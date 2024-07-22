@@ -1,94 +1,52 @@
-#![allow(unused_assignments)]
-#![allow(dead_code)]
+use layergen_rs::*;
+use rayon::prelude::*;
 
-use std::any::Any;
-use std::convert::AsRef;
-
-trait StepConfig: Any + Send + Sync + AsRef<dyn Any> {}
-
-#[derive(Debug)]
-struct WorldGenConfig {
-    map_size: usize,
+#[derive(Clone)]
+struct Voxel {
+    x: usize,
+    y: usize,
+    z: usize,
+    temperature: f32,
 }
 
-#[derive(Debug)]
-struct NoiseStepConfig {
-    seed: u64,
-    octaves: u32,
-}
-
-impl NoiseStepConfig {
-    fn new(seed: u64, octaves: u32) -> Self {
-        Self { seed, octaves }
-    }
-}
-
-impl AsRef<dyn Any> for NoiseStepConfig {
-    fn as_ref(&self) -> &(dyn Any) {
-        self
-    }
-}
-impl StepConfig for NoiseStepConfig {}
-
-#[derive(Debug)]
-struct VoxelChunk;
-
-type StepFunction<'a> = Box<dyn Fn(&mut VoxelChunk, &dyn StepConfig) + 'a>;
-
-struct Step<'a> {
-    function: StepFunction<'a>,
-    config: Box<dyn StepConfig + 'static>,
-}
-
-impl<'a> Step<'a> {
-    fn new<C: StepConfig + 'a>(function: StepFunction<'a>, config: C) -> Self {
-        Self {
-            function,
-            config: Box::new(config),
-        }
-    }
-
-    fn run(&self, chunk: &mut VoxelChunk) {
-        (self.function)(chunk, &*self.config);
-    }
-}
-
-struct Pipeline<'a> {
-    steps: Vec<Step<'a>>,
-    shared_config: WorldGenConfig,
-}
-
-impl<'a> Pipeline<'a> {
-    fn run(&self, chunk: &mut VoxelChunk) {
-        for step in &self.steps {
-            step.run(chunk);
+impl Voxel {
+    fn new(x: usize, y: usize, z: usize) -> Self {
+        Voxel {
+            x,
+            y,
+            z,
+            temperature: 0.0,
         }
     }
 }
 
-// --- Example Usage ---
+struct TemperatureStep;
+
+impl Step<Voxel> for TemperatureStep {
+    fn run(&self, grid: &mut DataSet<Voxel>) {
+        grid.par_iter_mut().for_each(|(voxel, _x, _y, _z)| {
+            // Lógica para alterar a temperatura
+            voxel.temperature += 1.0;
+        });
+    }
+}
 
 fn main() {
-    let noise_config = NoiseStepConfig::new(12345, 8);
+    let mut grid = DataSet::new(10, 10, 50, |x, y, z| Voxel::new(x, y, z));
 
-    let noise_step = Step::new(
-        Box::new(|_chunk, config| {
-            // Correct downcasting:
-            let noise_config = config
-                .as_ref() // Convert to &dyn Any
-                .downcast_ref::<NoiseStepConfig>()
-                .unwrap();
+    let pipeline = PipelineBuilder::new().add_step(TemperatureStep).build();
 
-            println!("Noise config: {:?}", noise_config);
-        }),
-        noise_config,
-    );
+    pipeline.run(&mut grid);
 
-    let pipeline = Pipeline {
-        steps: vec![noise_step],
-        shared_config: WorldGenConfig { map_size: 256 },
-    };
-
-    let mut chunk = VoxelChunk;
-    pipeline.run(&mut chunk);
+    for z in 0..grid.depth {
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                let voxel = grid.get(x, y, z).unwrap();
+                println!(
+                    "Voxel ({}, {}, {}): Temperature = {}",
+                    voxel.x, voxel.y, voxel.z, voxel.temperature
+                );
+            }
+        }
+    }
 }
