@@ -1,7 +1,6 @@
 use layergen_rs::*;
 use rayon::prelude::*;
 
-#[derive(Clone)]
 struct Voxel {
     x: usize,
     y: usize,
@@ -10,11 +9,11 @@ struct Voxel {
 }
 
 impl Voxel {
-    fn new(x: usize, y: usize, z: usize) -> Self {
+    fn new(pos: (usize, usize, usize)) -> Self {
         Voxel {
-            x,
-            y,
-            z,
+            x: pos.0,
+            y: pos.1,
+            z: pos.2,
             temperature: 0.0,
         }
     }
@@ -23,25 +22,24 @@ impl Voxel {
 struct TemperatureStep;
 
 impl Step<Voxel> for TemperatureStep {
-    fn run(&self, grid: &mut DataSet<Voxel>) {
-        grid.par_iter_mut().for_each(|(voxel, _x, _y, _z)| {
-            // Lógica para alterar a temperatura
+    fn run(&self, dataset: &mut DataSet<Voxel>) {
+        dataset.par_iter_mut().for_each(|(voxel, _x, _y, _z)| {
             voxel.temperature += 1.0;
         });
     }
 }
 
 fn main() {
-    let mut grid = DataSet::new(10, 10, 50, |x, y, z| Voxel::new(x, y, z));
+    let mut dataset = DataSet::new(10, 10, 50, |pos| Voxel::new(pos));
 
     let pipeline = PipelineBuilder::new().add_step(TemperatureStep).build();
 
-    pipeline.run(&mut grid);
+    pipeline.run(&mut dataset);
 
-    for z in 0..grid.depth {
-        for y in 0..grid.height {
-            for x in 0..grid.width {
-                let voxel = grid.get(x, y, z).unwrap();
+    for z in 0..10 {
+        for y in 0..10 {
+            for x in 0..50 {
+                let voxel = dataset.get(x, y, z).unwrap();
                 println!(
                     "Voxel ({}, {}, {}): Temperature = {}",
                     voxel.x, voxel.y, voxel.z, voxel.temperature
