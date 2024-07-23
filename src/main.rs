@@ -30,15 +30,15 @@ impl Step<Voxel> for TemperatureStep {
 }
 
 fn main() {
-    let mut dataset = DataSet::new(10, 10, 50, |pos| Voxel::new(pos));
+    let mut dataset = DataSet::new(10, 10, 50, |pos| Voxel::new(pos)).unwrap();
 
     let pipeline = PipelineBuilder::new().add_step(TemperatureStep).build();
 
     pipeline.run(&mut dataset);
 
-    for z in 0..10 {
-        for y in 0..10 {
-            for x in 0..50 {
+    for z in 0..9 {
+        for y in 0..9 {
+            for x in 0..9 {
                 let voxel = dataset.get(x, y, z).unwrap();
                 println!(
                     "Voxel ({}, {}, {}): Temperature = {}",

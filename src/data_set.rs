@@ -12,12 +12,17 @@ impl<T> DataSet<T>
 where
     T: Send + Sync,
 {
-    pub fn new<F>(width: usize, height: usize, depth: usize, mut initializer: F) -> Self
+    pub fn new<F>(
+        width: usize,
+        height: usize,
+        depth: usize,
+        mut initializer: F,
+    ) -> Result<Self, &'static str>
     where
         F: FnMut((usize, usize, usize)) -> T,
     {
         if width == 0 || height == 0 || depth == 0 {
-            panic!("DataSet cannot be created with zeroed size");
+            return Err("Failed to create DataSet: dimensions must be greater than zero");
         }
 
         let mut data = Vec::with_capacity(width * height * depth);
@@ -30,12 +35,12 @@ where
             }
         }
 
-        DataSet {
+        Ok(DataSet {
             data,
             width,
             height,
             depth,
-        }
+        })
     }
 
     pub fn get(&self, x: usize, y: usize, z: usize) -> Option<&T> {
@@ -123,7 +128,7 @@ mod tests {
     #[test]
     fn iter_dataset() {
         let init_data = (0, 0, 0);
-        let data = DataSet::new(10, 10, 10, |_| init_data);
+        let data = DataSet::new(10, 10, 10, |_| init_data).unwrap();
 
         for datum in data.into_iter() {
             assert_eq!(datum, init_data);
@@ -133,7 +138,7 @@ mod tests {
     #[test]
     fn iter_mut_dataset() {
         let init_data = (0, 0, 0);
-        let data = DataSet::new(10, 10, 10, |_| init_data);
+        let data = DataSet::new(10, 10, 10, |_| init_data).unwrap();
         let mut items: Vec<_> = data.into_iter().collect();
 
         for item in &mut items {
@@ -148,7 +153,7 @@ mod tests {
     #[test]
     fn test_par_iter() {
         let init_data = (0, 0, 0);
-        let data = DataSet::new(10, 10, 10, |_| init_data);
+        let data = DataSet::new(10, 10, 10, |_| init_data).unwrap();
 
         data.par_iter().for_each(|(v, _x, _y, _z)| {
             assert_eq!(*v, init_data);
@@ -158,7 +163,7 @@ mod tests {
     #[test]
     fn par_iter_mut() {
         let init_data = (0, 0, 0);
-        let mut data = DataSet::new(10, 10, 10, |_| init_data);
+        let mut data = DataSet::new(10, 10, 10, |_| init_data).unwrap();
 
         data.par_iter_mut().for_each(|(v, _x, _y, _z)| {
             assert_eq!(*v, init_data);
@@ -168,18 +173,18 @@ mod tests {
     #[test]
     #[should_panic]
     fn create_zero_size() {
-        DataSet::new(5, 0, 5, |_| 2.0);
+        DataSet::new(5, 0, 5, |_| 2.0).unwrap();
     }
 
     #[test]
     fn get_item_out_of_bounds() {
-        let data = DataSet::new(10, 10, 10, |_| 1);
+        let data = DataSet::new(10, 10, 10, |_| 1).unwrap();
         assert_eq!(data.get(100, 0, 0), None);
     }
 
     #[test]
     fn test_indexing() {
-        let mut data = DataSet::new(10, 10, 10, |_| (0, 0, 0));
+        let mut data = DataSet::new(10, 10, 10, |_| (0, 0, 0)).unwrap();
         data[(0, 0, 0)] = (1, 2, 3);
         assert_eq!(data[(0, 0, 0)], (1, 2, 3));
     }
