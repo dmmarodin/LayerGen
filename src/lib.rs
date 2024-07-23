@@ -43,7 +43,6 @@ impl<T, S> PipelineBuilder<T, S> {
     }
 }
 
-/// Estrutura para representar um pipeline.
 pub struct Pipeline<S> {
     steps: S,
 }

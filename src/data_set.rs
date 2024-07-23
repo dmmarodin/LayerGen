@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::ops::{Index, IndexMut};
 
 pub struct DataSet<T> {
     data: Vec<T>,
@@ -57,6 +58,18 @@ where
         vec![self.get(x, y + 1, z), self.get(x, y - 1, z)]
     }
 
+    pub fn par_iter(&self) -> impl ParallelIterator<Item = (&T, usize, usize, usize)> + '_ {
+        let width = self.width;
+        let height = self.height;
+
+        self.data.par_iter().enumerate().map(move |(i, item)| {
+            let x = i % width;
+            let y = (i / width) % height;
+            let z = i / (width * height);
+            (item, x, y, z)
+        })
+    }
+
     pub fn par_iter_mut(
         &mut self,
     ) -> impl ParallelIterator<Item = (&mut T, usize, usize, usize)> + '_ {
@@ -81,6 +94,28 @@ impl<T> IntoIterator for DataSet<T> {
     }
 }
 
+impl<T> Index<(usize, usize, usize)> for DataSet<T>
+where
+    T: Send + Sync,
+{
+    type Output = T;
+
+    fn index(&self, index: (usize, usize, usize)) -> &Self::Output {
+        let (x, y, z) = index;
+        self.get(x, y, z).expect("Index out of bounds")
+    }
+}
+
+impl<T> IndexMut<(usize, usize, usize)> for DataSet<T>
+where
+    T: Send + Sync,
+{
+    fn index_mut(&mut self, index: (usize, usize, usize)) -> &mut Self::Output {
+        let (x, y, z) = index;
+        self.get_mut(x, y, z).expect("Index out of bounds")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,7 +131,32 @@ mod tests {
     }
 
     #[test]
-    fn par_iter_dataset() {
+    fn iter_mut_dataset() {
+        let init_data = (0, 0, 0);
+        let data = DataSet::new(10, 10, 10, |_| init_data);
+        let mut items: Vec<_> = data.into_iter().collect();
+
+        for item in &mut items {
+            item.0 = 10;
+        }
+
+        for item in &items {
+            assert_eq!(item.0, 10);
+        }
+    }
+
+    #[test]
+    fn test_par_iter() {
+        let init_data = (0, 0, 0);
+        let data = DataSet::new(10, 10, 10, |_| init_data);
+
+        data.par_iter().for_each(|(v, _x, _y, _z)| {
+            assert_eq!(*v, init_data);
+        });
+    }
+
+    #[test]
+    fn par_iter_mut() {
         let init_data = (0, 0, 0);
         let mut data = DataSet::new(10, 10, 10, |_| init_data);
 
@@ -109,5 +169,18 @@ mod tests {
     #[should_panic]
     fn create_zero_size() {
         DataSet::new(5, 0, 5, |_| 2.0);
+    }
+
+    #[test]
+    fn get_item_out_of_bounds() {
+        let data = DataSet::new(10, 10, 10, |_| 1);
+        assert_eq!(data.get(100, 0, 0), None);
+    }
+
+    #[test]
+    fn test_indexing() {
+        let mut data = DataSet::new(10, 10, 10, |_| (0, 0, 0));
+        data[(0, 0, 0)] = (1, 2, 3);
+        assert_eq!(data[(0, 0, 0)], (1, 2, 3));
     }
 }
