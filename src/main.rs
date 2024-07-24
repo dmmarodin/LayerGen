@@ -31,11 +31,11 @@ impl Step<Voxel> for TemperatureStep {
 }
 
 fn main() {
-    let mut dataset = DataSet::new(10, 10, 50, |pos| Voxel::new(pos)).unwrap();
-
-    let pipeline = PipelineBuilder::new().add_step(TemperatureStep).build();
-
-    pipeline.run(&mut dataset).expect("error building pipeline");
+    let dataset = PipelineBuilder::new()
+        .add_step(TemperatureStep)
+        .build(10, 10, 50, |pos| Voxel::new(pos))
+        .run()
+        .expect("Error running pipeline");
 
     for z in 0..9 {
         for y in 0..9 {

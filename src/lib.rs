@@ -35,28 +35,45 @@ impl<T, S> PipelineBuilder<T, S> {
         }
     }
 
-    pub fn build(self) -> Pipeline<S>
+    pub fn build<F>(
+        self,
+        width: usize,
+        height: usize,
+        depth: usize,
+        initializer: F,
+    ) -> Pipeline<T, S>
     where
         S: Step<T>,
+        F: FnMut((usize, usize, usize)) -> T,
+        T: Sync + Send + Sized,
     {
-        Pipeline::new(self.steps)
+        let dataset = DataSet::new(width, height, depth, initializer).unwrap();
+        Pipeline::new(self.steps, Some(dataset))
     }
 }
 
-pub struct Pipeline<S> {
+pub struct Pipeline<T, S> {
+    dataset: Option<DataSet<T>>,
     steps: S,
 }
 
-impl<S> Pipeline<S> {
-    pub fn new(steps: S) -> Self {
-        Pipeline { steps }
+impl<T, S> Pipeline<T, S> {
+    pub fn new(steps: S, dataset: Option<DataSet<T>>) -> Self {
+        Pipeline { dataset, steps }
     }
 
-    pub fn run<T>(&self, grid: &mut DataSet<T>) -> PipelineStepResult
+    pub fn run(mut self) -> Result<DataSet<T>, String>
     where
         S: Step<T>,
     {
-        self.steps.run(grid)?;
-        Ok(())
+        if self.dataset.is_none() {
+            return Err("Dataset not initialized".into());
+        }
+
+        let mut dataset = self.dataset.take().unwrap();
+
+        self.steps.run(&mut dataset)?;
+
+        Ok(dataset)
     }
 }
