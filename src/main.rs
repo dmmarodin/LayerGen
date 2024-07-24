@@ -22,10 +22,11 @@ impl Voxel {
 struct TemperatureStep;
 
 impl Step<Voxel> for TemperatureStep {
-    fn run(&self, dataset: &mut DataSet<Voxel>) {
+    fn run(&self, dataset: &mut DataSet<Voxel>) -> PipelineStepResult {
         dataset.par_iter_mut().for_each(|(voxel, _x, _y, _z)| {
             voxel.temperature += 1.0;
         });
+        Ok(())
     }
 }
 
@@ -34,7 +35,7 @@ fn main() {
 
     let pipeline = PipelineBuilder::new().add_step(TemperatureStep).build();
 
-    pipeline.run(&mut dataset);
+    pipeline.run(&mut dataset).expect("error building pipeline");
 
     for z in 0..9 {
         for y in 0..9 {

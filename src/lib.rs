@@ -52,10 +52,11 @@ impl<S> Pipeline<S> {
         Pipeline { steps }
     }
 
-    pub fn run<T>(&self, grid: &mut DataSet<T>)
+    pub fn run<T>(&self, grid: &mut DataSet<T>) -> PipelineStepResult
     where
         S: Step<T>,
     {
-        self.steps.run(grid);
+        self.steps.run(grid)?;
+        Ok(())
     }
 }
