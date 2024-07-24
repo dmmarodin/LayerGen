@@ -60,7 +60,8 @@ let mut dataset = DataSet::new(10, 10, 50,
     |pos| Voxel {
         pos_x: pos.0,
         pos_y: pos.1,
-        pos_z: pos.2
+        pos_z: pos.2,
+        biome: Biome::Ocean
     }).unwrap();
 ```
 
@@ -70,7 +71,7 @@ The steps will run sequentially for each unit of the target struct inside the Da
 
 ```rust
     let pipeline = PipelineBuilder::new()
-        .add_step(TemperatureStep)
+        .add_step(BiomeDecisionStep)
         // .add_step() - add any other steps
         .build()
         .run(&mut dataset);
