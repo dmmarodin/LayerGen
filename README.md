@@ -59,6 +59,7 @@ bevy = "0.20"
 | `rayon` | Enabled | Parallel dataset iteration |
 | `serde` | Disabled | Dataset serialization and validated deserialization |
 | `bevy-example` | Disabled | Full Bevy dependency for the repository's windowed example |
+| `durable-example` | Disabled | Consumer-side JSON filesystem backend and headless restart test |
 
 Disable Rayon if it is not needed:
 
@@ -372,12 +373,28 @@ storage.
 The backend must provide consistent loads and atomic conditional writes.
 A simple read-then-write sequence is not sufficient for competing writers.
 
-`MemoryChunkStorage` is provided for tests and examples.
-**It does not survive application exit.**
+Two backends are available:
+
+- **`MemoryChunkStorage`**: library-provided test backend. Does not survive
+  application exit.
+- **`FileChunkStorage`**: consumer-side example in
+  `examples/support/file_storage.rs`. Uses versioned JSON records, an exclusive
+  storage-directory lock, serialized conditional writes, and temporary-file
+  replacement.
+
+The filesystem example is not a public library backend or a mandatory storage
+format. It validates persistence across normal process exit/restart.
+
+Successful example writes synchronize the temporary file before replacement,
+but do not synchronize directory metadata. **Power-loss durability is not
+guaranteed.** Other programs must respect the storage-directory lock.
 
 Saved records validate world/generation identities, pipeline configuration,
 dimensions, and replacement indices. Change your generation identity when
 algorithm changes make previous replacements incompatible.
+
+Optional Serde support does not automatically serialize persistence records;
+the filesystem example defines its own wire format.
 
 ## Game-state boundaries
 
@@ -406,7 +423,9 @@ No hard real-time or frame-budget guarantee is provided.
 
 See [roadmap.md](roadmap.md) for implemented contracts and remaining milestones.
 
-## Run the smoke test
+## Testing
+
+### Windowed in-memory smoke test
 
 From the repository:
 
@@ -414,7 +433,7 @@ From the repository:
 cargo run --features bevy-example --bin layergen-example
 ```
 
-The windowed example prepares a heightmap, validates two chunks, and exercises:
+The example prepares a heightmap, validates two adjacent chunks, and exercises:
 
 ```text
 load -> edit -> save -> unload -> reload
@@ -427,8 +446,74 @@ Watch the console for:
 LayerGen managed persistence smoke test PASSED
 ```
 
-This validates in-memory persistence across chunk reloads, not process restarts.
 The window remains open after success.
+
+This validates in-memory persistence across chunk reloads, not application
+restarts.
+
+### Durable persistence restart test
+
+The headless `durable` example uses the consumer-side filesystem backend.
+Each command below runs in a separate process.
+
+Use a **fresh storage directory** and run the commands in order:
+
+```bash
+cargo run --features durable-example --example durable -- save ./target/durable-smoke-1
+cargo run --features durable-example --example durable -- verify ./target/durable-smoke-1
+cargo run --features durable-example --example durable -- revert ./target/durable-smoke-1
+cargo run --features durable-example --example durable -- verify-base ./target/durable-smoke-1
+```
+
+| Command | Checks |
+|---|---|
+| `save` | Fresh base state; saves one replacement at revision 1 |
+| `verify` | Restores the replacement after restart at revision 1 |
+| `revert` | Removes the replacement and saves an empty record at revision 2 |
+| `verify-base` | Restores base state after restart while retaining revision 2 |
+
+Expected output:
+
+```text
+SAVE PASSED: replacement committed at revision 1
+RESTART VERIFY PASSED: replacement restored at revision 1
+REVERT PASSED: empty replacement record committed at revision 2
+RESTART VERIFY-BASE PASSED: base restored at revision 2
+```
+
+Each process waits for its managed operation to complete before exiting.
+
+The `save` command intentionally requires an absent record. To repeat the full
+sequence, choose another fresh directory, such as
+`./target/durable-smoke-2`.
+
+Do not run multiple commands concurrently against the same directory. The
+backend holds an exclusive directory lock for its lifetime.
+
+These checks validate normal-restart persistence, **not power-loss recovery**.
+The `target` directory is suitable for test data, but `cargo clean` removes it;
+use a separate location for data you want to retain.
+
+### Filesystem backend tests
+
+Run the tests embedded in the durable example explicitly:
+
+```bash
+cargo test --all-features --example durable
+```
+
+Coverage includes:
+
+- State and revisions surviving backend reopen.
+- Empty replacement records retaining revision history.
+- Stale conditional writes leaving stored state unchanged.
+- Exclusive directory ownership.
+- Malformed-record rejection.
+- Configuration mismatch rejection.
+- Generation identity mismatch rejection on replacement.
+- Abandoned temporary files not replacing committed records.
+
+The abandoned-file test is not comprehensive crash-injection coverage.
 
 ## Development checks
 
@@ -437,8 +522,12 @@ cargo fmt
 cargo test
 cargo test --no-default-features
 cargo test --all-features
+cargo test --all-features --example durable
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The explicit example-test command ensures the filesystem backend tests are run
+alongside the library and integration tests.
 
 ## License
 

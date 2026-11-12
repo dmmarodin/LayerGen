@@ -12,6 +12,11 @@ bevy = { version = "0.20", optional = true }
 rayon = { version = "1.10", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
+# Used by the consumer-side durable example, not the core storage API.
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+fs2 = { version = "0.4", optional = true }
+
 [dev-dependencies]
 serde_json = "1"
 
@@ -20,8 +25,19 @@ default = ["rayon"]
 rayon = ["dep:rayon"]
 serde = ["dep:serde"]
 bevy-example = ["dep:bevy"]
+durable-example = [
+    "serde",
+    "dep:serde_json",
+    "dep:tempfile",
+    "dep:fs2",
+]
 
 [[bin]]
 name = "layergen-example"
 path = "src/main.rs"
 required-features = ["bevy-example"]
+
+[[example]]
+name = "durable"
+path = "examples/durable.rs"
+required-features = ["durable-example"]
