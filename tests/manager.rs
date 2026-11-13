@@ -26,21 +26,14 @@ fn identity() -> PersistenceIdentity {
     }
 }
 
-fn app_with_storage(
-    storage: Arc<dyn ChunkStorage<i64>>,
-    limits: ChunkManagerLimits,
-) -> App {
-    let pipeline = PipelineBuilder::new(config())
-        .build(|position| position.0 + position.1 * 10);
+fn app_with_storage(storage: Arc<dyn ChunkStorage<i64>>, limits: ChunkManagerLimits) -> App {
+    let pipeline = PipelineBuilder::new(config()).build(|position| position.0 + position.1 * 10);
 
     let mut app = App::new();
 
     app.add_plugins(LayerGenPlugin::new(pipeline));
 
-    app.add_plugins(
-        ChunkManagerPlugin::new(identity(), storage)
-            .with_limits(limits),
-    );
+    app.add_plugins(ChunkManagerPlugin::new(identity(), storage).with_limits(limits));
 
     app
 }
@@ -54,15 +47,9 @@ fn wait_until(app: &mut App, mut condition: impl FnMut(&App) -> bool) {
         {
             let manager = app.world().resource::<ChunkManager<i64>>();
 
-            assert!(
-                manager.storage_jobs_count()
-                    <= manager.limits().max_storage_jobs()
-            );
+            assert!(manager.storage_jobs_count() <= manager.limits().max_storage_jobs());
 
-            assert!(
-                manager.outstanding_count()
-                    <= manager.limits().max_outstanding()
-            );
+            assert!(manager.outstanding_count() <= manager.limits().max_outstanding());
         }
 
         if condition(app) {
@@ -104,17 +91,13 @@ fn load(app: &mut App, coord: ChunkCoord) {
 fn edit_save_unload_reload_round_trip() {
     let storage = Arc::new(MemoryChunkStorage::default());
 
-    let mut app = app_with_storage(
-        storage,
-        ChunkManagerLimits::default(),
-    );
+    let mut app = app_with_storage(storage, ChunkManagerLimits::default());
 
     let coord = ChunkCoord(0, 0, 0);
     load(&mut app, coord);
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         assert_eq!(manager.get_global((-3, 0, 0)), Some(&-3));
 
@@ -124,20 +107,19 @@ fn edit_save_unload_reload_round_trip() {
 
         manager.request_save(coord).unwrap();
 
-        assert_eq!(
-            manager.discard(coord),
-            Err(ChunkManagerError::SaveInFlight),
-        );
+        assert_eq!(manager.discard(coord), Err(ChunkManagerError::SaveInFlight),);
     }
 
     assert!(matches!(
         wait_for_completion(&mut app).result,
-        Ok(ManagedOutcome::Saved { edit_revision: 1, .. }),
+        Ok(ManagedOutcome::Saved {
+            edit_revision: 1,
+            ..
+        }),
     ));
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         assert!(!manager.chunk(coord).unwrap().is_dirty());
         manager.unload(coord).unwrap();
@@ -163,8 +145,7 @@ fn edits_after_save_capture_remain_dirty() {
     load(&mut app, coord);
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.set_global((-3, 0, 0), 10).unwrap();
         manager.request_save(coord).unwrap();
@@ -180,12 +161,14 @@ fn edits_after_save_capture_remain_dirty() {
 
     assert!(matches!(
         wait_for_completion(&mut app).result,
-        Ok(ManagedOutcome::Saved { edit_revision: 1, .. }),
+        Ok(ManagedOutcome::Saved {
+            edit_revision: 1,
+            ..
+        }),
     ));
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         assert_eq!(manager.get_global((-3, 0, 0)), Some(&20));
         assert!(manager.chunk(coord).unwrap().is_dirty());
@@ -195,7 +178,10 @@ fn edits_after_save_capture_remain_dirty() {
 
     assert!(matches!(
         wait_for_completion(&mut app).result,
-        Ok(ManagedOutcome::Saved { edit_revision: 2, .. }),
+        Ok(ManagedOutcome::Saved {
+            edit_revision: 2,
+            ..
+        }),
     ));
 
     let manager = app.world().resource::<ChunkManager<i64>>();
@@ -206,17 +192,13 @@ fn edits_after_save_capture_remain_dirty() {
 fn reverting_saved_edits_persists_an_empty_record() {
     let storage = Arc::new(MemoryChunkStorage::default());
 
-    let mut app = app_with_storage(
-        storage.clone(),
-        ChunkManagerLimits::default(),
-    );
+    let mut app = app_with_storage(storage.clone(), ChunkManagerLimits::default());
 
     let coord = ChunkCoord(0, 0, 0);
     load(&mut app, coord);
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.set_global((-3, 0, 0), 10).unwrap();
         manager.request_save(coord).unwrap();
@@ -225,8 +207,7 @@ fn reverting_saved_edits_persists_an_empty_record() {
     wait_for_completion(&mut app).result.unwrap();
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.set_global((-3, 0, 0), -3).unwrap();
         manager.request_save(coord).unwrap();
@@ -262,19 +243,14 @@ impl Default for GatedLoadStorage {
 }
 
 impl ChunkStorage<i64> for GatedLoadStorage {
-    fn load(
-        &self,
-        key: &ChunkKey,
-    ) -> Result<Option<StoredChunk<i64>>, PersistenceError> {
+    fn load(&self, key: &ChunkKey) -> Result<Option<StoredChunk<i64>>, PersistenceError> {
         self.started.store(true, Ordering::SeqCst);
 
         let deadline = Instant::now() + Duration::from_secs(10);
 
         while !self.release.load(Ordering::SeqCst) {
             if Instant::now() >= deadline {
-                return Err(PersistenceError::Backend(
-                    "Load gate timed out".to_owned(),
-                ));
+                return Err(PersistenceError::Backend("Load gate timed out".to_owned()));
             }
 
             thread::sleep(Duration::from_millis(1));
@@ -297,10 +273,7 @@ impl ChunkStorage<i64> for GatedLoadStorage {
 fn stale_storage_load_cannot_replace_new_residency() {
     let storage = Arc::new(GatedLoadStorage::default());
 
-    let mut app = app_with_storage(
-        storage.clone(),
-        ChunkManagerLimits::new(4, 2, 1).unwrap(),
-    );
+    let mut app = app_with_storage(storage.clone(), ChunkManagerLimits::new(4, 2, 1).unwrap());
 
     let coord = ChunkCoord(0, 0, 0);
 
@@ -313,8 +286,7 @@ fn stale_storage_load_cannot_replace_new_residency() {
     wait_until(&mut app, |_| storage.started.load(Ordering::SeqCst));
 
     let new_id = {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.discard(coord).unwrap();
         manager.request_load(coord).unwrap()
@@ -331,8 +303,7 @@ fn stale_storage_load_cannot_replace_new_residency() {
             == 2
     });
 
-    let mut manager =
-        app.world_mut().resource_mut::<ChunkManager<i64>>();
+    let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
     let first = manager.take_completed().unwrap();
     let second = manager.take_completed().unwrap();
@@ -349,15 +320,9 @@ fn stale_storage_load_cannot_replace_new_residency() {
         .find(|completion| completion.request_id == new_id)
         .unwrap();
 
-    assert_eq!(
-        old.result,
-        Ok(ManagedOutcome::Loaded { installed: false }),
-    );
+    assert_eq!(old.result, Ok(ManagedOutcome::Loaded { installed: false }),);
 
-    assert_eq!(
-        new.result,
-        Ok(ManagedOutcome::Loaded { installed: true }),
-    );
+    assert_eq!(new.result, Ok(ManagedOutcome::Loaded { installed: true }),);
 
     assert_eq!(manager.resident_count(), 1);
     assert!(!manager.is_loading(coord));
@@ -373,8 +338,7 @@ fn invalidated_queued_load_is_not_installed() {
     let coord = ChunkCoord(0, 0, 0);
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.request_load(coord).unwrap();
         manager.discard(coord).unwrap();
@@ -386,9 +350,7 @@ fn invalidated_queued_load_is_not_installed() {
     );
 
     assert_eq!(
-        app.world()
-            .resource::<ChunkManager<i64>>()
-            .resident_count(),
+        app.world().resource::<ChunkManager<i64>>().resident_count(),
         0,
     );
 }
@@ -412,8 +374,7 @@ fn unconsumed_completions_keep_operation_capacity_reserved() {
             == 1
     });
 
-    let mut manager =
-        app.world_mut().resource_mut::<ChunkManager<i64>>();
+    let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
     assert_eq!(
         manager.request_load(ChunkCoord(1, 0, 0)),
@@ -432,8 +393,7 @@ fn pending_loads_reserve_resident_capacity() {
         ChunkManagerLimits::new(4, 1, 1).unwrap(),
     );
 
-    let mut manager =
-        app.world_mut().resource_mut::<ChunkManager<i64>>();
+    let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
     manager.request_load(ChunkCoord(0, 0, 0)).unwrap();
 
@@ -448,10 +408,7 @@ struct FailingSaveStorage {
 }
 
 impl ChunkStorage<i64> for FailingSaveStorage {
-    fn load(
-        &self,
-        key: &ChunkKey,
-    ) -> Result<Option<StoredChunk<i64>>, PersistenceError> {
+    fn load(&self, key: &ChunkKey) -> Result<Option<StoredChunk<i64>>, PersistenceError> {
         self.inner.load(key)
     }
 
@@ -461,9 +418,7 @@ impl ChunkStorage<i64> for FailingSaveStorage {
         _expected: Option<StorageRevision>,
         _record: ChunkRecord<i64>,
     ) -> Result<StorageRevision, PersistenceError> {
-        Err(PersistenceError::Backend(
-            "Planned save failure".to_owned(),
-        ))
+        Err(PersistenceError::Backend("Planned save failure".to_owned()))
     }
 }
 
@@ -480,8 +435,7 @@ fn failed_save_keeps_dirty_state_and_releases_save_lock() {
     load(&mut app, coord);
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.set_global((-3, 0, 0), 99).unwrap();
         manager.request_save(coord).unwrap();
@@ -494,8 +448,7 @@ fn failed_save_keeps_dirty_state_and_releases_save_lock() {
         )) if message == "Planned save failure"
     ));
 
-    let mut manager =
-        app.world_mut().resource_mut::<ChunkManager<i64>>();
+    let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
     assert!(manager.chunk(coord).unwrap().is_dirty());
     assert_eq!(manager.chunk(coord).unwrap().storage_revision(), None);
@@ -508,10 +461,7 @@ fn failed_save_keeps_dirty_state_and_releases_save_lock() {
 fn external_write_causes_conflict_without_marking_chunk_clean() {
     let storage = Arc::new(MemoryChunkStorage::default());
 
-    let mut app = app_with_storage(
-        storage.clone(),
-        ChunkManagerLimits::default(),
-    );
+    let mut app = app_with_storage(storage.clone(), ChunkManagerLimits::default());
 
     let coord = ChunkCoord(0, 0, 0);
     load(&mut app, coord);
@@ -523,13 +473,10 @@ fn external_write_causes_conflict_without_marking_chunk_clean() {
 
     let key = record.key();
 
-    let external_revision = storage
-        .compare_exchange(&key, None, record)
-        .unwrap();
+    let external_revision = storage.compare_exchange(&key, None, record).unwrap();
 
     {
-        let mut manager =
-            app.world_mut().resource_mut::<ChunkManager<i64>>();
+        let mut manager = app.world_mut().resource_mut::<ChunkManager<i64>>();
 
         manager.set_global((-3, 0, 0), 99).unwrap();
         manager.request_save(coord).unwrap();
@@ -537,12 +484,10 @@ fn external_write_causes_conflict_without_marking_chunk_clean() {
 
     assert_eq!(
         wait_for_completion(&mut app).result,
-        Err(ChunkManagerError::Persistence(
-            PersistenceError::Conflict {
-                expected: None,
-                actual: Some(external_revision),
-            }
-        )),
+        Err(ChunkManagerError::Persistence(PersistenceError::Conflict {
+            expected: None,
+            actual: Some(external_revision),
+        })),
     );
 
     let manager = app.world().resource::<ChunkManager<i64>>();

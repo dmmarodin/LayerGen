@@ -4,7 +4,7 @@ use std::ops::{Index, IndexMut};
 use rayon::prelude::*;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataSet<T> {
     data: Vec<T>,
     width: usize,

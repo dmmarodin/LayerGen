@@ -10,10 +10,9 @@ use std::{
 use bevy_app::App;
 
 use layergen_rs::{
-    ChunkCoord, ChunkGenerator, ChunkSize, DataSet, GenerationError,
-    GenerationLimits, LayerGenPlugin, PipelineBuilder, PipelineConfig,
-    PipelineStepResult, PreparationError, PreparationStatus, RequestError,
-    SharedStep, Step, StepContext, WorldBounds,
+    ChunkCoord, ChunkGenerator, ChunkSize, DataSet, GenerationError, GenerationLimits,
+    LayerGenPlugin, PipelineBuilder, PipelineConfig, PipelineStepResult, PreparationError,
+    PreparationStatus, RequestError, SharedStep, Step, StepContext, WorldBounds,
 };
 
 fn config() -> PipelineConfig {
@@ -37,19 +36,13 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
-fn wait_for_completions<T: Send + Sync + 'static>(
-    app: &mut App,
-    expected: usize,
-) {
+fn wait_for_completions<T: Send + Sync + 'static>(app: &mut App, expected: usize) {
     wait_until(|| {
         app.update();
 
         let generation = app.world().resource::<ChunkGenerator<T>>();
 
-        assert!(
-            generation.in_flight_count()
-                <= generation.limits().max_in_flight()
-        );
+        assert!(generation.in_flight_count() <= generation.limits().max_in_flight());
 
         generation.completed_count() >= expected
     });
@@ -86,11 +79,7 @@ impl SharedStep<i64, SharedData> for ReadShared {
 struct Increment;
 
 impl Step<i64> for Increment {
-    fn run(
-        &self,
-        data: &mut DataSet<i64>,
-        _context: &StepContext,
-    ) -> PipelineStepResult {
+    fn run(&self, data: &mut DataSet<i64>, _context: &StepContext) -> PipelineStepResult {
         for (value, _, _, _) in data.iter_mut() {
             *value += 1;
         }
@@ -122,8 +111,7 @@ fn prepares_once_and_shares_one_instance_between_requests() {
 
     let mut app = App::new();
     app.add_plugins(
-        LayerGenPlugin::new(pipeline)
-            .with_limits(GenerationLimits::new(2, 4).unwrap()),
+        LayerGenPlugin::new(pipeline).with_limits(GenerationLimits::new(2, 4).unwrap()),
     );
 
     assert_eq!(preparation_calls.load(Ordering::SeqCst), 0);
@@ -135,8 +123,7 @@ fn prepares_once_and_shares_one_instance_between_requests() {
     );
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         generation.request_batch(ChunkCoord(0, 0, 0)).unwrap();
         generation.request_batch(ChunkCoord(1, 0, 0)).unwrap();
@@ -145,8 +132,7 @@ fn prepares_once_and_shares_one_instance_between_requests() {
     wait_for_completions::<i64>(&mut app, 2);
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         for _ in 0..2 {
             let chunk = generation.take_completed().unwrap().result.unwrap();
@@ -234,13 +220,11 @@ fn chunk_jobs_wait_for_preparation_and_queue_limits_still_apply() {
 
     let mut app = App::new();
     app.add_plugins(
-        LayerGenPlugin::new(pipeline)
-            .with_limits(GenerationLimits::new(1, 2).unwrap()),
+        LayerGenPlugin::new(pipeline).with_limits(GenerationLimits::new(1, 2).unwrap()),
     );
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         generation.request_batch(ChunkCoord(0, 0, 0)).unwrap();
         generation.request_batch(ChunkCoord(1, 0, 0)).unwrap();
@@ -297,8 +281,7 @@ fn preparation_error_fails_queued_requests_and_rejects_new_ones() {
     app.add_plugins(LayerGenPlugin::new(pipeline));
 
     let ids = {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         vec![
             generation.request_batch(ChunkCoord(0, 0, 0)).unwrap(),
@@ -308,11 +291,9 @@ fn preparation_error_fails_queued_requests_and_rejects_new_ones() {
 
     wait_for_completions::<i64>(&mut app, 2);
 
-    let expected_error =
-        PreparationError::Processing("Planned preparation failure".to_owned());
+    let expected_error = PreparationError::Processing("Planned preparation failure".to_owned());
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     assert_eq!(
         generation.preparation_status(),
@@ -364,8 +345,7 @@ fn preparation_panic_is_reported() {
 
     wait_for_completions::<i64>(&mut app, 1);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     assert_eq!(
         generation.preparation_status(),

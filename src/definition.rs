@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{Chunk, ChunkCoord, GlobalPosition, Pipeline, PipelineConfig, SharedStep};
+use crate::{Chunk, ChunkCoord, ChunkStep, GlobalPosition, Pipeline, PipelineConfig};
 
 /// A reusable definition accepted by LayerGenPlugin.
 ///
@@ -10,6 +10,10 @@ where
     T: Send + Sync + 'static,
 {
     type Shared: Send + Sync + 'static;
+
+    /// Consumer-defined per-chunk data returned alongside the cells.
+    /// `()` when the pipeline does not declare chunk data.
+    type ChunkData: Send + Sync + 'static;
 
     fn config(&self) -> PipelineConfig;
 
@@ -21,17 +25,19 @@ where
         &self,
         coord: ChunkCoord,
         shared: &Self::Shared,
-    ) -> Result<Chunk<T>, String>;
+    ) -> Result<Chunk<T, Self::ChunkData>, String>;
 }
 
-impl<T, S, F, D> GenerationDefinition<T> for Pipeline<T, S, F, D>
+impl<T, S, F, D, C> GenerationDefinition<T> for Pipeline<T, S, F, D, C>
 where
     T: Send + Sync + 'static,
     D: Send + Sync + 'static,
-    S: SharedStep<T, D>,
+    C: Send + Sync + 'static,
+    S: ChunkStep<T, C, D>,
     F: Fn(GlobalPosition) -> T + Send + Sync + 'static,
 {
     type Shared = D;
+    type ChunkData = C;
 
     fn config(&self) -> PipelineConfig {
         Pipeline::config(self)
@@ -49,7 +55,7 @@ where
         &self,
         coord: ChunkCoord,
         shared: &D,
-    ) -> Result<Chunk<T>, String> {
+    ) -> Result<Chunk<T, C>, String> {
         Pipeline::generate_chunk_with_shared(self, coord, shared)
     }
 }

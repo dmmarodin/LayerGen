@@ -22,31 +22,41 @@ use bevy_ecs::prelude::Resource;
 
 type PreparationFn<D> = dyn Fn(&PipelineConfig) -> Result<D, String> + Send + Sync + 'static;
 
+type ChunkDataFn<C, D> = dyn Fn(&StepContext, &D) -> C + Send + Sync + 'static;
+
 enum SharedSource<D> {
     Ready(Arc<D>),
     Prepare(Arc<PreparationFn<D>>),
 }
 
-pub struct PipelineBuilder<T, S = EmptyStep, D = ()> {
+fn unit_chunk_data<D: 'static>() -> Arc<ChunkDataFn<(), D>> {
+    Arc::new(|_: &StepContext, _: &D| ())
+}
+
+/// Builder order: `prepare` (optional), then `chunk_data` (optional),
+/// then steps, then `build`.
+pub struct PipelineBuilder<T, S = EmptyStep, D = (), C = ()> {
     config: PipelineConfig,
     steps: S,
     shared: SharedSource<D>,
+    chunk_data: Arc<ChunkDataFn<C, D>>,
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<T> PipelineBuilder<T, EmptyStep, ()> {
+impl<T> PipelineBuilder<T, EmptyStep, (), ()> {
     pub fn new(config: PipelineConfig) -> Self {
         Self {
             config,
             steps: EmptyStep,
             shared: SharedSource::Ready(Arc::new(())),
+            chunk_data: unit_chunk_data(),
             _marker: PhantomData,
         }
     }
 
     /// Defines background preparation.
     ///
-    /// Call this before adding steps.
+    /// Call this before `chunk_data` and before adding steps.
     /// Building the pipeline does not execute this function.
     ///
     /// The runtime executes it once per installed generator.
@@ -59,37 +69,71 @@ impl<T> PipelineBuilder<T, EmptyStep, ()> {
             config: self.config,
             steps: EmptyStep,
             shared: SharedSource::Prepare(Arc::new(preparation)),
+            chunk_data: unit_chunk_data(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<T, S, D> PipelineBuilder<T, S, D>
+impl<T, D> PipelineBuilder<T, EmptyStep, D, ()>
 where
     D: Send + Sync + 'static,
-    S: SharedStep<T, D>,
 {
-    /// Adds an existing local step that does not read shared data.
-    pub fn add_step<U>(self, step: U) -> PipelineBuilder<T, Chain<S, LocalStep<U>>, D>
+    /// Declares consumer-defined per-chunk data.
+    ///
+    /// Call this after `prepare` (if any) and before adding steps.
+    /// The initializer runs once per generated chunk, before the first step,
+    /// and may read prepared shared data. Steps added with `add_chunk_step`
+    /// can then read and write it; the result is returned with the chunk.
+    ///
+    /// Chunk data is deterministic base output. It is not persisted and is
+    /// not recomputed when managed cells are edited.
+    pub fn chunk_data<C, F>(self, initializer: F) -> PipelineBuilder<T, EmptyStep, D, C>
     where
-        U: Step<T>,
+        C: Send + Sync + 'static,
+        F: Fn(&StepContext, &D) -> C + Send + Sync + 'static,
     {
         PipelineBuilder {
             config: self.config,
-            steps: Chain {
-                first: self.steps,
-                second: LocalStep(step),
-            },
+            steps: EmptyStep,
             shared: self.shared,
+            chunk_data: Arc::new(initializer),
             _marker: PhantomData,
         }
     }
+}
+
+impl<T, S, D, C> PipelineBuilder<T, S, D, C>
+where
+    D: Send + Sync + 'static,
+    C: Send + Sync + 'static,
+    S: ChunkStep<T, C, D>,
+{
+    /// Adds an existing local step that does not read shared or chunk data.
+    pub fn add_step<U>(self, step: U) -> PipelineBuilder<T, Chain<S, LocalStep<U>>, D, C>
+    where
+        U: Step<T>,
+    {
+        self.chain(LocalStep(step))
+    }
 
     /// Adds a step that can read prepared shared data.
-    pub fn add_shared_step<U>(self, step: U) -> PipelineBuilder<T, Chain<S, U>, D>
+    pub fn add_shared_step<U>(self, step: U) -> PipelineBuilder<T, Chain<S, SharedOnly<U>>, D, C>
     where
         U: SharedStep<T, D>,
     {
+        self.chain(SharedOnly(step))
+    }
+
+    /// Adds a step that can read and write chunk data and read shared data.
+    pub fn add_chunk_step<U>(self, step: U) -> PipelineBuilder<T, Chain<S, U>, D, C>
+    where
+        U: ChunkStep<T, C, D>,
+    {
+        self.chain(step)
+    }
+
+    fn chain<U>(self, step: U) -> PipelineBuilder<T, Chain<S, U>, D, C> {
         PipelineBuilder {
             config: self.config,
             steps: Chain {
@@ -97,12 +141,13 @@ where
                 second: step,
             },
             shared: self.shared,
+            chunk_data: self.chunk_data,
             _marker: PhantomData,
         }
     }
 
     /// Builds a definition without preparing shared data or allocating chunks.
-    pub fn build<F>(self, initializer: F) -> Pipeline<T, S, F, D>
+    pub fn build<F>(self, initializer: F) -> Pipeline<T, S, F, D, C>
     where
         T: Send + Sync + 'static,
         F: Fn(GlobalPosition) -> T + Send + Sync + 'static,
@@ -112,31 +157,35 @@ where
             steps: self.steps,
             initializer,
             shared: self.shared,
+            chunk_data: self.chunk_data,
             _marker: PhantomData,
         }
     }
 }
 
 #[derive(Resource)]
-pub struct Pipeline<T, S, F, D = ()>
+pub struct Pipeline<T, S, F, D = (), C = ()>
 where
     T: Send + Sync + 'static,
     S: Send + Sync + 'static,
     F: Send + Sync + 'static,
     D: Send + Sync + 'static,
+    C: Send + Sync + 'static,
 {
     config: PipelineConfig,
     steps: S,
     initializer: F,
     shared: SharedSource<D>,
+    chunk_data: Arc<ChunkDataFn<C, D>>,
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<T, S, F, D> Pipeline<T, S, F, D>
+impl<T, S, F, D, C> Pipeline<T, S, F, D, C>
 where
     T: Send + Sync + 'static,
     D: Send + Sync + 'static,
-    S: SharedStep<T, D>,
+    C: Send + Sync + 'static,
+    S: ChunkStep<T, C, D>,
     F: Fn(GlobalPosition) -> T + Send + Sync + 'static,
 {
     pub fn config(&self) -> PipelineConfig {
@@ -167,7 +216,7 @@ where
     /// For pipelines configured with `.prepare(...)`, explicitly obtain
     /// shared data with `prepare_shared` and call
     /// `generate_chunk_with_shared`, or use the async runtime.
-    pub fn generate_chunk(&self, coord: ChunkCoord) -> Result<Chunk<T>, String> {
+    pub fn generate_chunk(&self, coord: ChunkCoord) -> Result<Chunk<T, C>, String> {
         match &self.shared {
             SharedSource::Ready(shared) => self.generate_chunk_with_shared(coord, shared.as_ref()),
             SharedSource::Prepare(_) => Err(
@@ -185,7 +234,7 @@ where
         &self,
         coord: ChunkCoord,
         shared: &D,
-    ) -> Result<Chunk<T>, String> {
+    ) -> Result<Chunk<T, C>, String> {
         let context = self.config.context(coord).map_err(str::to_owned)?;
         let (width, height, depth) = context.dimensions();
 
@@ -198,9 +247,15 @@ where
         })
         .map_err(str::to_owned)?;
 
-        SharedStep::run(&self.steps, &mut data, &context, shared)?;
+        let mut chunk_data = (self.chunk_data)(&context, shared);
 
-        Ok(Chunk { context, data })
+        ChunkStep::run(&self.steps, &mut data, &mut chunk_data, &context, shared)?;
+
+        Ok(Chunk {
+            context,
+            data,
+            chunk_data,
+        })
     }
 }
 

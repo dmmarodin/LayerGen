@@ -12,15 +12,16 @@ use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
 use bevy_tasks::{futures_lite::future, AsyncComputeTaskPool, Task, TaskPool};
 
-type Worker<T> = dyn Fn(ChunkCoord) -> Result<Chunk<T>, String> + Send + Sync + 'static;
+type Worker<T, C> = dyn Fn(ChunkCoord) -> Result<Chunk<T, C>, String> + Send + Sync + 'static;
 
-type PreparationWorker<T> = dyn Fn() -> Result<Arc<Worker<T>>, String> + Send + Sync + 'static;
+type PreparationWorker<T, C> =
+    dyn Fn() -> Result<Arc<Worker<T, C>>, String> + Send + Sync + 'static;
 
-type PreparationResult<T> = Result<Arc<Worker<T>>, PreparationError>;
+type PreparationResult<T, C> = Result<Arc<Worker<T, C>>, PreparationError>;
 
-enum RuntimeSource<T> {
-    Ready(Arc<Worker<T>>),
-    Prepare(Arc<PreparationWorker<T>>),
+enum RuntimeSource<T, C> {
+    Ready(Arc<Worker<T, C>>),
+    Prepare(Arc<PreparationWorker<T, C>>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -170,10 +171,10 @@ impl fmt::Display for GenerationError {
 impl Error for GenerationError {}
 
 #[derive(Debug)]
-pub struct ChunkCompletion<T> {
+pub struct ChunkCompletion<T, C = ()> {
     pub request_id: RequestId,
     pub coord: ChunkCoord,
-    pub result: Result<Chunk<T>, GenerationError>,
+    pub result: Result<Chunk<T, C>, GenerationError>,
 }
 
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -187,31 +188,31 @@ struct QueuedRequest {
     coord: ChunkCoord,
 }
 
-struct RunningRequest<T> {
+struct RunningRequest<T, C> {
     request_id: RequestId,
     coord: ChunkCoord,
-    task: Task<Result<Chunk<T>, GenerationError>>,
+    task: Task<Result<Chunk<T, C>, GenerationError>>,
 }
 
 #[derive(Resource)]
-pub struct ChunkGenerator<T: Send + Sync + 'static> {
+pub struct ChunkGenerator<T: Send + Sync + 'static, C: Send + Sync + 'static = ()> {
     config: PipelineConfig,
     limits: GenerationLimits,
 
     preparation_status: PreparationStatus,
-    preparation_factory: Option<Arc<PreparationWorker<T>>>,
-    preparation_task: Option<Task<PreparationResult<T>>>,
-    worker: Option<Arc<Worker<T>>>,
+    preparation_factory: Option<Arc<PreparationWorker<T, C>>>,
+    preparation_task: Option<Task<PreparationResult<T, C>>>,
+    worker: Option<Arc<Worker<T, C>>>,
 
     next_id: Option<u64>,
     outstanding_coords: HashSet<ChunkCoord>,
     queued: VecDeque<QueuedRequest>,
-    running: Vec<RunningRequest<T>>,
-    completed: VecDeque<ChunkCompletion<T>>,
+    running: Vec<RunningRequest<T, C>>,
+    completed: VecDeque<ChunkCompletion<T, C>>,
 }
 
-impl<T: Send + Sync + 'static> ChunkGenerator<T> {
-    fn new(config: PipelineConfig, limits: GenerationLimits, source: &RuntimeSource<T>) -> Self {
+impl<T: Send + Sync + 'static, C: Send + Sync + 'static> ChunkGenerator<T, C> {
+    fn new(config: PipelineConfig, limits: GenerationLimits, source: &RuntimeSource<T, C>) -> Self {
         let (preparation_status, preparation_factory, worker) = match source {
             RuntimeSource::Ready(worker) => {
                 (PreparationStatus::Ready, None, Some(Arc::clone(worker)))
@@ -289,7 +290,7 @@ impl<T: Send + Sync + 'static> ChunkGenerator<T> {
     /// Removes a completion and releases its outstanding request slot.
     ///
     /// Completion order is unspecified.
-    pub fn take_completed(&mut self) -> Option<ChunkCompletion<T>> {
+    pub fn take_completed(&mut self) -> Option<ChunkCompletion<T, C>> {
         let completion = self.completed.pop_front()?;
         self.outstanding_coords.remove(&completion.coord);
         Some(completion)
@@ -315,31 +316,32 @@ impl<T: Send + Sync + 'static> ChunkGenerator<T> {
     }
 }
 
-/// One pipeline per voxel type per Bevy world.
+/// One pipeline per voxel type and chunk data type per Bevy world.
 ///
+/// `C` is the definition's chunk data type (`()` unless declared).
 /// The plugin owns the definition. Prepared data is retained immutably
 /// by the ready worker and shared between chunk jobs.
-pub struct LayerGenPlugin<T: Send + Sync + 'static> {
+pub struct LayerGenPlugin<T: Send + Sync + 'static, C: Send + Sync + 'static = ()> {
     config: PipelineConfig,
     limits: GenerationLimits,
-    source: RuntimeSource<T>,
+    source: RuntimeSource<T, C>,
 }
 
-impl<T: Send + Sync + 'static> LayerGenPlugin<T> {
+impl<T: Send + Sync + 'static, C: Send + Sync + 'static> LayerGenPlugin<T, C> {
     pub fn new<P>(pipeline: P) -> Self
     where
-        P: GenerationDefinition<T>,
+        P: GenerationDefinition<T, ChunkData = C>,
     {
         let config = pipeline.config();
         let requires_preparation = pipeline.requires_preparation();
         let pipeline = Arc::new(pipeline);
 
         let source = if requires_preparation {
-            let factory: Arc<PreparationWorker<T>> = Arc::new(move || {
+            let factory: Arc<PreparationWorker<T, C>> = Arc::new(move || {
                 let shared = pipeline.prepare_shared()?;
                 let pipeline = Arc::clone(&pipeline);
 
-                let worker: Arc<Worker<T>> = Arc::new(move |coord| {
+                let worker: Arc<Worker<T, C>> = Arc::new(move |coord| {
                     pipeline.generate_chunk_with_shared(coord, shared.as_ref())
                 });
 
@@ -353,7 +355,7 @@ impl<T: Send + Sync + 'static> LayerGenPlugin<T> {
                 .prepare_shared()
                 .expect("Ready shared data must be available");
 
-            let worker: Arc<Worker<T>> =
+            let worker: Arc<Worker<T, C>> =
                 Arc::new(move |coord| pipeline.generate_chunk_with_shared(coord, shared.as_ref()));
 
             RuntimeSource::Ready(worker)
@@ -372,28 +374,30 @@ impl<T: Send + Sync + 'static> LayerGenPlugin<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> Plugin for LayerGenPlugin<T> {
+impl<T: Send + Sync + 'static, C: Send + Sync + 'static> Plugin for LayerGenPlugin<T, C> {
     fn build(&self, app: &mut App) {
         assert!(
-            !app.world().contains_resource::<ChunkGenerator<T>>(),
-            "Only one LayerGen pipeline per voxel type may be installed"
+            !app.world().contains_resource::<ChunkGenerator<T, C>>(),
+            "Only one LayerGen pipeline per voxel and chunk data type may be installed"
         );
 
         app.insert_resource(ChunkGenerator::new(self.config, self.limits, &self.source));
 
         app.add_systems(
             PreUpdate,
-            collect_completed::<T>.in_set(LayerGenSet::Collect),
+            collect_completed::<T, C>.in_set(LayerGenSet::Collect),
         );
 
         app.add_systems(
             PostUpdate,
-            dispatch_requests::<T>.in_set(LayerGenSet::Dispatch),
+            dispatch_requests::<T, C>.in_set(LayerGenSet::Dispatch),
         );
     }
 }
 
-fn dispatch_requests<T: Send + Sync + 'static>(mut generator: ResMut<ChunkGenerator<T>>) {
+fn dispatch_requests<T: Send + Sync + 'static, C: Send + Sync + 'static>(
+    mut generator: ResMut<ChunkGenerator<T, C>>,
+) {
     if matches!(generator.preparation_status, PreparationStatus::Unprepared) {
         let factory = generator
             .preparation_factory
@@ -452,7 +456,9 @@ fn dispatch_requests<T: Send + Sync + 'static>(mut generator: ResMut<ChunkGenera
     }
 }
 
-fn collect_completed<T: Send + Sync + 'static>(mut generator: ResMut<ChunkGenerator<T>>) {
+fn collect_completed<T: Send + Sync + 'static, C: Send + Sync + 'static>(
+    mut generator: ResMut<ChunkGenerator<T, C>>,
+) {
     let preparation_result = generator
         .preparation_task
         .as_mut()

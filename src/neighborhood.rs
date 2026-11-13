@@ -1,24 +1,40 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
-    Chain, Chunk, ChunkCoord, DataSet, EmptyStep, GenerationDefinition, GlobalPosition,
-    LocalPosition, LocalStep, Pipeline, PipelineConfig, PipelineStepResult, SharedStep, Step,
-    StepContext,
+    Chain, Chunk, ChunkCoord, ChunkStep, DataSet, EmptyStep, GenerationDefinition, GlobalPosition,
+    LocalPosition, LocalStep, Pipeline, PipelineConfig, PipelineStepResult, SharedOnly, SharedStep,
+    Step, StepContext,
 };
 
-/// Symmetric neighborhood radius in cells along all three axes.
+/// Neighborhood radius in cells, per axis (symmetric along each axis).
+///
+/// Per-axis radii avoid planning dependency chunks along axes a step never
+/// reads, e.g. column-wise steps that only need X/Y neighbors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Neighborhood {
-    radius: u32,
+    radii: (u32, u32, u32),
 }
 
 impl Neighborhood {
+    /// Same radius along all three axes.
     pub fn radius(radius: u32) -> Self {
-        Self { radius }
+        Self {
+            radii: (radius, radius, radius),
+        }
     }
 
+    /// Independent radius per axis; zero means no neighbors along that axis.
+    pub fn axes(x: u32, y: u32, z: u32) -> Self {
+        Self { radii: (x, y, z) }
+    }
+
+    pub fn radii(self) -> (u32, u32, u32) {
+        self.radii
+    }
+
+    /// Largest per-axis radius (equals the radius for symmetric neighborhoods).
     pub fn cell_radius(self) -> u32 {
-        self.radius
+        self.radii.0.max(self.radii.1).max(self.radii.2)
     }
 }
 
@@ -84,6 +100,108 @@ pub trait NeighborhoodStep<T, D>: Send + Sync + 'static {
         context: &StepContext,
         shared: &D,
     ) -> PipelineStepResult;
+}
+
+/// Neighborhood step that also reads prefix chunk data of the requested and
+/// dependency chunks, and writes the requested chunk's output chunk data.
+pub trait NeighborhoodChunkStep<T, C, D>: Send + Sync + 'static {
+    fn run(
+        &self,
+        input: &NeighborhoodView<'_, T>,
+        chunks: &NeighborChunks<'_, C>,
+        output: &mut DataSet<T>,
+        output_chunk: &mut C,
+        context: &StepContext,
+        shared: &D,
+    ) -> PipelineStepResult;
+}
+
+/// Adapter used by `with_neighborhood`: runs a cell-only neighborhood step
+/// in a pipeline with chunk data, without exposing that data.
+#[derive(Clone, Debug)]
+pub struct CellsOnly<N>(pub N);
+
+impl<T, C, D, N> NeighborhoodChunkStep<T, C, D> for CellsOnly<N>
+where
+    N: NeighborhoodStep<T, D>,
+{
+    fn run(
+        &self,
+        input: &NeighborhoodView<'_, T>,
+        _chunks: &NeighborChunks<'_, C>,
+        output: &mut DataSet<T>,
+        _output_chunk: &mut C,
+        context: &StepContext,
+        shared: &D,
+    ) -> PipelineStepResult {
+        self.0.run(input, output, context, shared)
+    }
+}
+
+/// Immutable prefix-stage chunk data for every chunk intersecting the
+/// declared, world-clipped neighborhood (including the requested chunk).
+///
+/// Each entry is that chunk's complete prefix chunk data, not clipped
+/// to the readable region.
+pub struct NeighborChunks<'a, C> {
+    chunks: &'a [Option<C>],
+    first: ChunkCoord,
+    last: ChunkCoord,
+    readable_min: GlobalPosition,
+    readable_max: GlobalPosition,
+    context: StepContext,
+}
+
+impl<C> NeighborChunks<'_, C> {
+    /// Returns:
+    /// - Ok(value): a chunk intersecting the declared neighborhood.
+    /// - Err: a chunk outside the declared neighborhood or missing input.
+    pub fn get(&self, coord: ChunkCoord) -> Result<&C, String> {
+        let index = chunk_index(self.first, self.last, coord)
+            .ok_or_else(|| format!("Chunk {coord:?} is outside the declared neighborhood"))?;
+
+        self.chunks
+            .get(index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| format!("Missing internal neighborhood chunk data for {coord:?}"))
+    }
+
+    /// Reads chunk data of the chunk containing a global position.
+    ///
+    /// Same contract as `NeighborhoodView::get_global`:
+    /// Ok(None) for declared outside-world positions, Err for undeclared reads.
+    pub fn get_global(&self, position: GlobalPosition) -> Result<Option<&C>, String> {
+        if !contains(self.readable_min, self.readable_max, position) {
+            return Err(format!(
+                "Read {position:?} is outside the declared neighborhood"
+            ));
+        }
+
+        let Some((coord, _)) = self.context.config().locate(position) else {
+            return Ok(None);
+        };
+
+        self.get(coord).map(Some)
+    }
+}
+
+fn chunk_index(first: ChunkCoord, last: ChunkCoord, coord: ChunkCoord) -> Option<usize> {
+    let inside = (first.0..=last.0).contains(&coord.0)
+        && (first.1..=last.1).contains(&coord.1)
+        && (first.2..=last.2).contains(&coord.2);
+
+    if !inside {
+        return None;
+    }
+
+    let width = (last.0 - first.0) as usize + 1;
+    let height = (last.1 - first.1) as usize + 1;
+
+    Some(
+        (coord.0 - first.0) as usize
+            + (coord.1 - first.1) as usize * width
+            + (coord.2 - first.2) as usize * width * height,
+    )
 }
 
 /// Immutable prefix-stage input.
@@ -175,21 +293,37 @@ pub struct NeighborhoodPipeline<T, P, N, S = EmptyStep> {
     _marker: PhantomData<fn() -> T>,
 }
 
-impl<T, S, F, D> Pipeline<T, S, F, D>
+impl<T, S, F, D, C> Pipeline<T, S, F, D, C>
 where
     T: Clone + Send + Sync + 'static,
     D: Send + Sync + 'static,
-    S: SharedStep<T, D>,
+    C: Clone + Send + Sync + 'static,
+    S: ChunkStep<T, C, D>,
     F: Fn(GlobalPosition) -> T + Send + Sync + 'static,
 {
+    /// Wraps this pipeline with a cell-only neighborhood stage.
     pub fn with_neighborhood<N>(
+        self,
+        neighborhood: Neighborhood,
+        limits: NeighborhoodLimits,
+        step: N,
+    ) -> NeighborhoodPipeline<T, Self, CellsOnly<N>>
+    where
+        N: NeighborhoodStep<T, D>,
+    {
+        self.with_chunk_neighborhood(neighborhood, limits, CellsOnly(step))
+    }
+
+    /// Wraps this pipeline with a neighborhood stage that also reads prefix
+    /// chunk data of dependency chunks and writes output chunk data.
+    pub fn with_chunk_neighborhood<N>(
         self,
         neighborhood: Neighborhood,
         limits: NeighborhoodLimits,
         step: N,
     ) -> NeighborhoodPipeline<T, Self, N>
     where
-        N: NeighborhoodStep<T, D>,
+        N: NeighborhoodChunkStep<T, C, D>,
     {
         NeighborhoodPipeline {
             prefix: self,
@@ -206,30 +340,35 @@ impl<T, P, N, S> NeighborhoodPipeline<T, P, N, S>
 where
     T: Clone + Send + Sync + 'static,
     P: GenerationDefinition<T>,
-    N: NeighborhoodStep<T, P::Shared>,
-    S: SharedStep<T, P::Shared>,
+    P::ChunkData: Clone,
+    N: NeighborhoodChunkStep<T, P::ChunkData, P::Shared>,
+    S: ChunkStep<T, P::ChunkData, P::Shared>,
 {
     pub fn add_step<U>(self, step: U) -> NeighborhoodPipeline<T, P, N, Chain<S, LocalStep<U>>>
     where
         U: Step<T>,
     {
-        NeighborhoodPipeline {
-            prefix: self.prefix,
-            neighborhood: self.neighborhood,
-            limits: self.limits,
-            step: self.step,
-            suffix: Chain {
-                first: self.suffix,
-                second: LocalStep(step),
-            },
-            _marker: PhantomData,
-        }
+        self.chain(LocalStep(step))
     }
 
-    pub fn add_shared_step<U>(self, step: U) -> NeighborhoodPipeline<T, P, N, Chain<S, U>>
+    pub fn add_shared_step<U>(
+        self,
+        step: U,
+    ) -> NeighborhoodPipeline<T, P, N, Chain<S, SharedOnly<U>>>
     where
         U: SharedStep<T, P::Shared>,
     {
+        self.chain(SharedOnly(step))
+    }
+
+    pub fn add_chunk_step<U>(self, step: U) -> NeighborhoodPipeline<T, P, N, Chain<S, U>>
+    where
+        U: ChunkStep<T, P::ChunkData, P::Shared>,
+    {
+        self.chain(step)
+    }
+
+    fn chain<U>(self, step: U) -> NeighborhoodPipeline<T, P, N, Chain<S, U>> {
         NeighborhoodPipeline {
             prefix: self.prefix,
             neighborhood: self.neighborhood,
@@ -244,7 +383,7 @@ where
     }
 
     /// Synchronous diagnostic execution for a pipeline without preparation.
-    pub fn generate_chunk(&self, coord: ChunkCoord) -> Result<Chunk<T>, String> {
+    pub fn generate_chunk(&self, coord: ChunkCoord) -> Result<Chunk<T, P::ChunkData>, String> {
         if self.prefix.requires_preparation() {
             return Err(
                 "Pipeline requires preparation; use the asynchronous runtime \
@@ -263,10 +402,12 @@ impl<T, P, N, S> GenerationDefinition<T> for NeighborhoodPipeline<T, P, N, S>
 where
     T: Clone + Send + Sync + 'static,
     P: GenerationDefinition<T>,
-    N: NeighborhoodStep<T, P::Shared>,
-    S: SharedStep<T, P::Shared>,
+    P::ChunkData: Clone,
+    N: NeighborhoodChunkStep<T, P::ChunkData, P::Shared>,
+    S: ChunkStep<T, P::ChunkData, P::Shared>,
 {
     type Shared = P::Shared;
+    type ChunkData = P::ChunkData;
 
     fn config(&self) -> PipelineConfig {
         self.prefix.config()
@@ -284,7 +425,7 @@ where
         &self,
         coord: ChunkCoord,
         shared: &Self::Shared,
-    ) -> Result<Chunk<T>, String> {
+    ) -> Result<Chunk<T, P::ChunkData>, String> {
         let config = self.prefix.config();
         let context = config.context(coord).map_err(str::to_owned)?;
 
@@ -307,8 +448,23 @@ where
 
         copy_intersection(output.data(), context, &plan, &mut input)?;
 
+        // Prefix chunk data for every planned chunk. The requested chunk's
+        // entry is an immutable snapshot; output keeps the mutable original.
+        // Planning bounded the chunk count by max_dependency_chunks.
+        let chunk_count = chunk_index(plan.first, plan.last, plan.last)
+            .map(|index| index + 1)
+            .ok_or_else(|| "Invalid neighborhood chunk range".to_owned())?;
+
+        let mut chunks: Vec<Option<P::ChunkData>> = (0..chunk_count).map(|_| None).collect();
+
+        let requested_index = chunk_index(plan.first, plan.last, coord)
+            .ok_or_else(|| "Requested chunk outside its neighborhood plan".to_owned())?;
+
+        chunks[requested_index] = Some(output.chunk_data().clone());
+
         // Dependency chunks execute sequentially in this same request job.
-        // They run through the prefix only and are dropped after copying.
+        // They run through the prefix only; cells are dropped after copying
+        // and chunk data is retained for the neighborhood step.
         for z in plan.first.2..=plan.last.2 {
             for y in plan.first.1..=plan.last.1 {
                 for x in plan.first.0..=plan.last.0 {
@@ -326,6 +482,11 @@ where
                         })?;
 
                     copy_intersection(dependency.data(), dependency.context(), &plan, &mut input)?;
+
+                    let index = chunk_index(plan.first, plan.last, dependency_coord)
+                        .ok_or_else(|| "Dependency chunk outside its plan".to_owned())?;
+
+                    chunks[index] = Some(dependency.into_parts().1);
                 }
             }
         }
@@ -345,11 +506,33 @@ where
             context,
         };
 
+        let neighbor_chunks = NeighborChunks {
+            chunks: &chunks,
+            first: plan.first,
+            last: plan.last,
+            readable_min: plan.readable_min,
+            readable_max: plan.readable_max,
+            context,
+        };
+
+        let Chunk {
+            context: _,
+            data: output_data,
+            chunk_data: output_chunk,
+        } = &mut output;
+
         self.step
-            .run(&view, output.data_mut(), &context, shared)
+            .run(
+                &view,
+                &neighbor_chunks,
+                output_data,
+                output_chunk,
+                &context,
+                shared,
+            )
             .map_err(|error| format!("Neighborhood stage failed: {error}"))?;
 
-        SharedStep::run(&self.suffix, output.data_mut(), &context, shared)
+        ChunkStep::run(&self.suffix, output_data, output_chunk, &context, shared)
             .map_err(|error| format!("Neighborhood suffix failed: {error}"))?;
 
         Ok(output)
@@ -375,7 +558,8 @@ impl Plan {
     ) -> Result<Self, String> {
         let origin = context.origin();
         let dimensions = context.dimensions();
-        let radius = i64::from(neighborhood.cell_radius());
+        let (rx, ry, rz) = neighborhood.radii();
+        let (rx, ry, rz) = (i64::from(rx), i64::from(ry), i64::from(rz));
 
         let output_max = (
             checked_end(origin.0, dimensions.0)?,
@@ -384,15 +568,15 @@ impl Plan {
         );
 
         let readable_min = (
-            checked_sub_radius(origin.0, radius)?,
-            checked_sub_radius(origin.1, radius)?,
-            checked_sub_radius(origin.2, radius)?,
+            checked_sub_radius(origin.0, rx)?,
+            checked_sub_radius(origin.1, ry)?,
+            checked_sub_radius(origin.2, rz)?,
         );
 
         let readable_max = (
-            checked_add_radius(output_max.0, radius)?,
-            checked_add_radius(output_max.1, radius)?,
-            checked_add_radius(output_max.2, radius)?,
+            checked_add_radius(output_max.0, rx)?,
+            checked_add_radius(output_max.1, ry)?,
+            checked_add_radius(output_max.2, rz)?,
         );
 
         let world_min = config.world().origin();

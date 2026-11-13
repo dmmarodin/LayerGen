@@ -26,11 +26,7 @@ fn source_value(position: GlobalPosition, seed: i64) -> i64 {
 struct Prefix;
 
 impl Step<i64> for Prefix {
-    fn run(
-        &self,
-        data: &mut DataSet<i64>,
-        context: &StepContext,
-    ) -> PipelineStepResult {
+    fn run(&self, data: &mut DataSet<i64>, context: &StepContext) -> PipelineStepResult {
         for (value, x, y, z) in data.iter_mut() {
             let global = context.global_position((x, y, z)).unwrap();
 
@@ -60,9 +56,7 @@ impl<D: Send + Sync + 'static> NeighborhoodStep<i64, D> for AverageBox {
             for dz in -self.radius..=self.radius {
                 for dy in -self.radius..=self.radius {
                     for dx in -self.radius..=self.radius {
-                        if let Some(sample) =
-                            input.get_offset((x, y, z), (dx, dy, dz))?
-                        {
+                        if let Some(sample) = input.get_offset((x, y, z), (dx, dy, dz))? {
                             total += *sample;
                             count += 1;
                         }
@@ -80,11 +74,7 @@ impl<D: Send + Sync + 'static> NeighborhoodStep<i64, D> for AverageBox {
 struct Suffix;
 
 impl Step<i64> for Suffix {
-    fn run(
-        &self,
-        data: &mut DataSet<i64>,
-        _context: &StepContext,
-    ) -> PipelineStepResult {
+    fn run(&self, data: &mut DataSet<i64>, _context: &StepContext) -> PipelineStepResult {
         for (value, _, _, _) in data.iter_mut() {
             *value += 1_000;
         }
@@ -100,11 +90,7 @@ fn reference(config: PipelineConfig, position: GlobalPosition, radius: i64) -> i
     for dz in -radius..=radius {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                let sample = (
-                    position.0 + dx,
-                    position.1 + dy,
-                    position.2 + dz,
-                );
+                let sample = (position.0 + dx, position.1 + dy, position.2 + dz);
 
                 if config.world().contains(sample) {
                     total += source_value(sample, config.seed() as i64);
@@ -275,12 +261,10 @@ fn dependency_chunk_and_prefix_work_limits_are_enforced() {
             AverageBox { radius: 1 },
         );
 
-    assert!(
-        chunk_limited
-            .generate_chunk(ChunkCoord(0, 0, 0))
-            .unwrap_err()
-            .contains("prefix chunks")
-    );
+    assert!(chunk_limited
+        .generate_chunk(ChunkCoord(0, 0, 0))
+        .unwrap_err()
+        .contains("prefix chunks"));
 
     let work_limited = PipelineBuilder::new(config())
         .build(|_| 0i64)
@@ -290,12 +274,10 @@ fn dependency_chunk_and_prefix_work_limits_are_enforced() {
             AverageBox { radius: 1 },
         );
 
-    assert!(
-        work_limited
-            .generate_chunk(ChunkCoord(0, 0, 0))
-            .unwrap_err()
-            .contains("prefix cells")
-    );
+    assert!(work_limited
+        .generate_chunk(ChunkCoord(0, 0, 0))
+        .unwrap_err()
+        .contains("prefix cells"));
 }
 
 struct FailingNeighborhood;
@@ -327,7 +309,10 @@ fn wait_for_completions(app: &mut App, expected: usize) {
             return;
         }
 
-        assert!(Instant::now() < deadline, "Neighborhood runtime test timed out");
+        assert!(
+            Instant::now() < deadline,
+            "Neighborhood runtime test timed out"
+        );
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -388,8 +373,7 @@ fn preparation_and_neighborhood_work_together_in_bevy() {
     app.add_plugins(LayerGenPlugin::new(pipeline));
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         generation.request_batch(ChunkCoord(0, 0, 0)).unwrap();
         generation.request_batch(ChunkCoord(1, 0, 0)).unwrap();
@@ -397,8 +381,7 @@ fn preparation_and_neighborhood_work_together_in_bevy() {
 
     wait_for_completions(&mut app, 2);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     while let Some(completion) = generation.take_completed() {
         let chunk = completion.result.unwrap();

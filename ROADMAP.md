@@ -22,7 +22,8 @@ Prefer explicit limitations over silently approximating unsupported behavior.
   - bevy_tasks with multi_threaded enabled
 - Optional Rayon support, enabled by default.
 - Optional Serde support.
-- Optional full Bevy dependency for the windowed smoke-test binary.
+- Optional serde_json, tempfile, and fs2, used only by the consumer-side
+  durable example (`durable-example` feature), not by the core storage API.
 - Current asynchronous runtime targets native platforms.
 - No guarantee of nonblocking CPU generation or blocking storage on WebAssembly.
 
@@ -64,17 +65,24 @@ Prefer explicit limitations over silently approximating unsupported behavior.
 - src/runtime.rs
 - src/persistence.rs
 - src/manager.rs
-- src/main.rs
+### Examples
+
+- examples/durable.rs
+- examples/support/file_storage.rs
 
 ### Integration tests
 
 - tests/async_runtime.rs
 - tests/preparation.rs
+- tests/smoke.rs
 - tests/neighborhood.rs
 - tests/persistence.rs
 - tests/manager.rs
+- tests/chunk_data.rs
 
-Additional unit tests are embedded in library modules.
+Additional unit tests are embedded in library modules. The filesystem backend
+tests are embedded in the durable example and run with
+`cargo test --all-features --example durable`.
 
 ## Milestone status
 
@@ -88,12 +96,15 @@ Additional unit tests are embedded in library modules.
 | One bounded neighborhood stage | Implemented |
 | Sparse persistence records and conditional storage | Implemented |
 | Managed residency, editing, and revisions | Implemented |
-| Durable backend and restart validation | Next |
-| Save-and-unload and shutdown/drain workflow | Planned |
+| Per-chunk consumer data (`C`) | Implemented |
+| Durable backend and restart validation | Implemented as a consumer-side example |
+| Save-and-unload and shutdown/drain workflow | Next |
 | General staged neighborhoods | Deferred until needed |
 
-“Implemented persistence” currently means the storage contract, in-memory
-backend, and runtime integration. It does not yet mean bundled durable storage.
+“Implemented persistence” means the storage contract, in-memory backend, and
+runtime integration. The library still does not bundle durable storage: the
+filesystem backend is a consumer-side example that validates the contract
+across normal process restarts.
 
 ## Implemented and locally validated
 
@@ -607,6 +618,63 @@ and separate entity records are not automatically one atomic transaction.
 
 Cross-domain transaction coordination is outside the current implementation.
 
+### 12. Per-chunk consumer data
+
+Motivation: values coarser than cells (per chunk, per column) had nowhere to
+live except inside every T, multiplying memory and repeated sampling of
+shared world models (e.g. per-column climate derived from tectonics).
+
+Contract:
+
+    PipelineBuilder::new(config)
+        .prepare(prepare_fn)                      // optional, first
+        .chunk_data(|context, shared| C)          // optional, before steps
+        .add_chunk_step(step)                     // ChunkStep<T, C, D>
+        .add_step(step) / .add_shared_step(step)  // adapted, never see C
+        .build(initializer)
+
+    ChunkStep<T, C, D>::run(&mut DataSet<T>, &mut C, &StepContext, &D)
+
+- C is consumer-defined and axis-agnostic: per-chunk values, a depth-1
+  DataSet of columns, or both. C defaults to () everywhere.
+- The chunk data initializer runs once per generated chunk, after cell
+  initialization and before the first step, and may read shared data.
+- Chunk<T, C> exposes chunk_data(), chunk_data_mut(), into_parts().
+- GenerationDefinition<T> has associated type ChunkData
+  (breaking only for custom GenerationDefinition implementors).
+- Step and SharedStep participate through LocalStep and SharedOnly adapters.
+  add_shared_step now wraps in SharedOnly (pipeline type names changed;
+  behavior unchanged).
+- ChunkGenerator<T, C = ()>, ChunkCompletion<T, C = ()>, LayerGenPlugin<T, C = ()>,
+  ChunkManager<T, C = ()>, ManagedChunk<T, C = ()> carry C.
+  ChunkManagerPlugin::new remains for C = (); pipelines with chunk data use
+  ChunkManagerPlugin::<T, C>::with_chunk_data(identity, storage).
+- One generator per (T, C) pair per Bevy world.
+
+Neighborhood:
+
+- with_neighborhood(N: NeighborhoodStep) still works (CellsOnly adapter).
+- with_chunk_neighborhood(N: NeighborhoodChunkStep<T, C, D>) also receives
+  NeighborChunks<C>: complete prefix chunk data of every planned chunk
+  (requested chunk included, as an immutable snapshot), plus &mut output C.
+- NeighborChunks::get(coord) errors outside the plan; get_global(position)
+  follows NeighborhoodView semantics (Ok(None) outside world, Err undeclared).
+- Neighborhood pipelines require C: Clone (requested snapshot).
+- Retained dependency chunk data is not counted by NeighborhoodLimits.
+- Suffix steps are ChunkSteps and see the neighborhood's output C.
+- Neighborhood::axes(x, y, z) gives per-axis radii (radius(r) = axes(r, r, r)).
+  Planning, readable bounds and limits use the per-axis extents, so column
+  steps (axes(1, 1, 0)) skip vertical dependency chunks. cell_radius()
+  returns the largest axis radius.
+
+Managed state:
+
+- C is deterministic generated base output: never persisted, never part of
+  replacement records, and not recomputed by cell edits. An edited chunk's C
+  can disagree with its edited cells; consumers own any such derivation.
+
+Also: DataSet<T> derives PartialEq/Eq.
+
 ## Current working consumer patterns
 
 ### Generation only
@@ -656,7 +724,7 @@ Coverage includes:
 - Operation/resident capacity.
 - Save failures retaining dirty state.
 
-The windowed example has been updated to exercise:
+The headless smoke test (`tests/smoke.rs`, no window) exercises:
 
 1. Prepare one 4096-sample heightmap.
 2. Load two adjacent 4096-voxel chunks.
@@ -666,9 +734,10 @@ The windowed example has been updated to exercise:
 6. Revert to generated base and save.
 7. Unload/reload and validate an empty replacement record at revision 2.
 
-It uses MemoryChunkStorage and does not test process restarts.
+It uses MemoryChunkStorage and does not test process restarts. Restart
+persistence is validated separately by the headless durable example.
 
-The earlier preparation smoke test completed in approximately 741 ms.
+An earlier windowed preparation smoke test completed in approximately 741 ms.
 That included startup/frame/window scheduling and is NOT an algorithm benchmark.
 
 Do not optimize from that number alone.
@@ -677,7 +746,12 @@ Do not optimize from that number alone.
 
 Not implemented:
 
-- Durable backend or restart persistence validation.
+- A bundled durable backend (the filesystem backend is consumer-side example
+  code and its format is not mandatory).
+- Power-loss durability: the example syncs the temporary file before
+  replacement but does not sync directory metadata.
+- Multi-process writers to one storage directory without respecting the
+  example's directory lock.
 - Record migration.
 - Automatic conflict merging.
 - Automatic saving or eviction.
@@ -696,64 +770,56 @@ Not implemented:
 Additional constraints:
 
 - Generation definitions still return base data only.
+- Chunk data is base-only and not updated by edits.
 - Persistence applies only to requested managed output, not neighborhood inputs.
 - Two dense datasets are retained per managed resident chunk.
 - Completion queues must be consumed to release operation capacity.
 - Dropping the app does not guarantee running writes never committed.
 - Count limits do not bound arbitrary allocations inside T or callbacks.
 
-## Next milestone: durable persistence example
+## Completed milestone: durable persistence example
 
-Implement a consumer-side durable backend example without making its format or
-filesystem layout mandatory for LayerGen users.
+Implemented in `examples/support/file_storage.rs` (`FileChunkStorage`) and
+`examples/durable.rs`, as consumer-side code. Its format and filesystem layout
+are not mandatory for LayerGen users, and ChunkManager has no filesystem
+knowledge: it builds on the existing ChunkStorage contract.
 
-Purpose:
+Purpose: validate the contract against real serialization, record replacement,
+and application restarts.
 
-Validate the existing contract against real serialization, I/O failures,
-record replacement, and application restarts.
+### Writer scope
 
-### Initial writer scope
+- One application process per storage directory, enforced by an exclusive
+  directory lock held for the backend's lifetime.
+- Revision comparison and record replacement are serialized within the process.
+- Atomic file replacement alone does NOT make revision comparison plus writing
+  atomic between competing writers. Other programs must respect the lock.
+- Do not claim multi-process conditional-write safety beyond this lock, or
+  power-loss durability.
 
-Recommended first scope:
+### Decisions made
 
-- One application process per storage directory.
-- Serialize revision comparison and record replacement within that process.
+- Versioned JSON records (format version 1).
+- Serialized record size limit of 4 MiB; it bounds serialized input, not
+  arbitrary allocations or decoded memory.
+- Identities are limited to 1–128 UTF-8 bytes and validated before mapping to
+  storage locations.
+- Successful writes synchronize the temporary file before replacement; directory
+  metadata is not synchronized.
+- Abandoned temporary files do not replace committed records. This is not
+  comprehensive crash-injection coverage.
 
-Decide how this scope is enforced or clearly documented.
+### Validation
 
-Atomic file replacement alone does NOT make revision comparison plus writing
-atomic between competing writers.
-
-Do not claim multi-process conditional-write safety without appropriate
-locking or transactional storage.
-
-### Required design decisions
-
-- Record format/version.
-- Safe mapping of consumer identities to storage locations.
-- Decoded record size limits.
-- Commit and durability guarantees.
-- Temporary-file and interrupted-write handling.
-- Platform-specific replacement behavior.
-- Error behavior when commit outcome is uncertain.
-
-Build on the existing ChunkStorage contract rather than adding filesystem
-knowledge to ChunkManager.
-
-### Acceptance tests
-
-- Save an edit, terminate normally, restart, and restore it.
-- Persist a revert and restore the base value after restart.
-- Preserve storage revisions across restart.
-- Reject incompatible identity/configuration.
-- Reject malformed or truncated records.
-- Conditional writes reject stale revisions.
-- Interrupted writes do not silently produce accepted corrupt state.
-- Explicitly document what a successful write guarantees.
+- Headless restart sequence across separate processes: `save`, `verify`,
+  `revert`, `verify-base` (see README).
+- Embedded tests cover revisions surviving reopen, empty records retaining
+  history, stale conditional writes, exclusive directory ownership, malformed
+  records, configuration and generation mismatch, and abandoned temporary files.
 
 Keep the in-memory backend for fast tests.
 
-## Following milestone: save-and-unload and shutdown/drain
+## Next milestone: save-and-unload and shutdown/drain
 
 Add explicit lifecycle support after durable storage behavior is understood.
 
@@ -815,11 +881,19 @@ dependency contract. It must not silently change deterministic base semantics.
     cargo test
     cargo test --no-default-features
     cargo test --all-features
+    cargo test --all-features --example durable
     cargo clippy --all-targets --all-features -- -D warnings
 
-Windowed smoke test:
+Headless smoke test (also part of `cargo test`):
 
-    cargo run --features bevy-example --bin layergen-example
+    cargo test --test smoke
+
+Durable restart test (fresh directory; run in order, one process each):
+
+    cargo run --features durable-example --example durable -- save ./target/durable-smoke-1
+    cargo run --features durable-example --example durable -- verify ./target/durable-smoke-1
+    cargo run --features durable-example --example durable -- revert ./target/durable-smoke-1
+    cargo run --features durable-example --example durable -- verify-base ./target/durable-smoke-1
 
 ## Working rules for future changes
 

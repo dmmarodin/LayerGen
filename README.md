@@ -21,6 +21,7 @@ asynchronous execution.
 - Background generation through Bevy's task pool.
 - Once-per-generator preparation of consumer-defined shared data.
 - One bounded cross-chunk neighborhood stage.
+- Per-chunk consumer data (per-chunk or per-column values) alongside cells.
 - Library-owned resident chunk management and tracked editing.
 - Sparse latest-state replacements.
 - Conditional storage writes and revision-safe save acknowledgements.
@@ -58,7 +59,6 @@ bevy = "0.20"
 |---|---|---|
 | `rayon` | Enabled | Parallel dataset iteration |
 | `serde` | Disabled | Dataset serialization and validated deserialization |
-| `bevy-example` | Disabled | Full Bevy dependency for the repository's windowed example |
 | `durable-example` | Disabled | Consumer-side JSON filesystem backend and headless restart test |
 
 Disable Rayon if it is not needed:
@@ -227,6 +227,70 @@ Preparation:
 
 Direct `prepare_shared()` calls are diagnostic and do not cache preparation.
 
+## Per-chunk data
+
+Values coarser than cells, such as one value per chunk or per column, can
+live in a consumer-defined chunk data type instead of being repeated in every
+cell:
+
+```rust
+#[derive(Clone)]
+struct Climate {
+    // One sample per (x, y) column: a depth-1 dataset.
+    temperature: DataSet<f32>,
+}
+
+struct SampleClimate;
+
+impl ChunkStep<Voxel, Climate, Tectonics> for SampleClimate {
+    fn run(
+        &self,
+        _cells: &mut DataSet<Voxel>,
+        climate: &mut Climate,
+        context: &StepContext,
+        tectonics: &Tectonics,
+    ) -> PipelineStepResult {
+        let origin = context.origin();
+
+        for (value, x, y, _) in climate.temperature.iter_mut() {
+            *value = tectonics.temperature_at(origin.0 + x as i64, origin.1 + y as i64);
+        }
+
+        Ok(())
+    }
+}
+
+let pipeline = PipelineBuilder::new(config)
+    .prepare(|config| Ok(Tectonics::generate(config.seed())))
+    .chunk_data(|context, _tectonics| {
+        let (width, height, _) = context.dimensions();
+        Climate {
+            temperature: DataSet::new(width, height, 1, |_| 0.0).unwrap(),
+        }
+    })
+    .add_chunk_step(SampleClimate)
+    .add_step(TerrainStep)
+    .build(Voxel::new);
+
+let chunk = pipeline.generate_chunk_with_shared(coord, &tectonics)?;
+let climate: &Climate = chunk.chunk_data();
+```
+
+This is an API sketch: `Tectonics`, `Voxel`, and `TerrainStep` are supplied
+by the consumer.
+
+- Call `chunk_data` after `prepare` and before adding steps.
+- The initializer runs once per generated chunk and may read shared data.
+- `Step` and `SharedStep` implementations can be mixed in; they do not see
+  chunk data.
+- Chunk data defaults to `()`; existing pipelines are unaffected.
+- Resources carry the type: `ChunkGenerator<Voxel, Climate>`,
+  `ChunkManager<Voxel, Climate>`.
+- Install the manager with
+  `ChunkManagerPlugin::<Voxel, Climate>::with_chunk_data(identity, storage)`.
+- Chunk data is generated base output. It is not persisted and is not
+  recomputed when managed cells are edited.
+
 ## Bounded neighborhood processing
 
 A regular pipeline can be wrapped with one neighborhood stage:
@@ -244,6 +308,12 @@ let pipeline = prefix
 This is an API sketch. The consumer supplies a `NeighborhoodStep` and optional
 local/shared suffix steps.
 
+`Neighborhood::radius(r)` is symmetric on all axes. Use
+`Neighborhood::axes(x, y, z)` when a step only reads along some axes (for
+example `axes(1, 1, 0)` for column-wise steps): dependency chunks are planned
+only along axes with a nonzero radius, and reads along a zero-radius axis are
+undeclared errors.
+
 Neighborhood inputs are immutable **prefix-only base data**. Dependencies are
 generated inside the existing request task, without requiring resident
 neighbors or issuing public neighbor requests.
@@ -254,6 +324,11 @@ neighbors or issuing public neighbor requests.
 - Undeclared reads and missing internal inputs are errors.
 - Limits bound dependency count, prefix work, and temporary dataset cells.
 - Neighborhood pipelines require `T: Clone`.
+
+Use `with_chunk_neighborhood` with a `NeighborhoodChunkStep` to also read the
+prefix chunk data of every planned chunk through `NeighborChunks` (same
+`Ok(None)` / error contract as cells) and write the output chunk data. This
+requires the chunk data type to be `Clone`.
 
 Multiple neighborhood stages and cross-request dependency caching are not yet
 implemented.
@@ -425,28 +500,22 @@ See [roadmap.md](roadmap.md) for implemented contracts and remaining milestones.
 
 ## Testing
 
-### Windowed in-memory smoke test
+### Headless in-memory smoke test
 
-From the repository:
+The end-to-end test lives in `tests/smoke.rs` and needs no window or extra
+features:
 
 ```bash
-cargo run --features bevy-example --bin layergen-example
+cargo test --test smoke
 ```
 
-The example prepares a heightmap, validates two adjacent chunks, and exercises:
+It prepares a heightmap, validates every cell of two adjacent chunks, and
+exercises:
 
 ```text
 load -> edit -> save -> unload -> reload
      -> revert -> save -> unload -> reload
 ```
-
-Watch the console for:
-
-```text
-LayerGen managed persistence smoke test PASSED
-```
-
-The window remains open after success.
 
 This validates in-memory persistence across chunk reloads, not application
 restarts.

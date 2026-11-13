@@ -62,10 +62,7 @@ fn global_edits_respect_residency_and_partial_edges() {
     assert!(chunk.set_global((1, 1, 0), 50).unwrap());
     assert_eq!(chunk.data()[(0, 1, 0)], 50);
 
-    assert_eq!(
-        chunk.set_local((1, 0, 0), 10),
-        Err(EditError::OutsideChunk),
-    );
+    assert_eq!(chunk.set_local((1, 0, 0), 10), Err(EditError::OutsideChunk),);
 
     assert_eq!(
         chunk.set_global((0, 0, 0), 10),
@@ -89,16 +86,10 @@ fn sparse_records_round_trip_over_regenerated_base() {
     let record = original.snapshot_record();
     let key = record.key();
 
-    let revision = storage
-        .compare_exchange(&key, None, record)
-        .unwrap();
+    let revision = storage.compare_exchange(&key, None, record).unwrap();
 
-    let restored = ManagedChunk::from_base(
-        base(coord),
-        identity(),
-        storage.load(&key).unwrap(),
-    )
-    .unwrap();
+    let restored =
+        ManagedChunk::from_base(base(coord), identity(), storage.load(&key).unwrap()).unwrap();
 
     assert_eq!(restored.data().as_slice(), original.data().as_slice());
     assert_eq!(restored.replacements().len(), 1);
@@ -116,9 +107,7 @@ fn stale_save_cannot_overwrite_newer_storage() {
     let first = chunk.snapshot_record();
     let key = first.key();
 
-    let revision = storage
-        .compare_exchange(&key, None, first.clone())
-        .unwrap();
+    let revision = storage.compare_exchange(&key, None, first.clone()).unwrap();
 
     let result = storage.compare_exchange(&key, None, first);
 
@@ -146,18 +135,12 @@ fn empty_records_preserve_revision_history() {
     let first = chunk.snapshot_record();
     let key = first.key();
 
-    let first_revision = storage
-        .compare_exchange(&key, None, first)
-        .unwrap();
+    let first_revision = storage.compare_exchange(&key, None, first).unwrap();
 
     chunk.set_local((0, 0, 0), -3).unwrap();
 
     let second_revision = storage
-        .compare_exchange(
-            &key,
-            Some(first_revision),
-            chunk.snapshot_record(),
-        )
+        .compare_exchange(&key, Some(first_revision), chunk.snapshot_record())
         .unwrap();
 
     assert!(second_revision.value() > first_revision.value());
@@ -191,10 +174,7 @@ fn incompatible_generation_is_rejected_not_hidden() {
         storage.load(&key).unwrap(),
     );
 
-    assert!(matches!(
-        result,
-        Err(PersistenceError::IdentityMismatch),
-    ));
+    assert!(matches!(result, Err(PersistenceError::IdentityMismatch),));
 }
 
 #[test]
@@ -226,11 +206,7 @@ fn changed_seed_is_rejected() {
     let chunk = managed(ChunkCoord(0, 0, 0));
     let mut record = chunk.snapshot_record();
 
-    record.config = PipelineConfig::new(
-        config().world(),
-        config().chunk_size(),
-        8,
-    );
+    record.config = PipelineConfig::new(config().world(), config().chunk_size(), 8);
 
     let result = ManagedChunk::from_base(
         base(ChunkCoord(0, 0, 0)),
@@ -281,10 +257,7 @@ fn concurrent_conditional_writes_have_exactly_one_winner() {
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(
-                result,
-                Err(PersistenceError::Conflict { .. })
-            ))
+            .filter(|result| matches!(result, Err(PersistenceError::Conflict { .. })))
             .count(),
         1,
     );

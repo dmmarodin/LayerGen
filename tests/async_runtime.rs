@@ -6,9 +6,9 @@ use std::{
 use bevy_app::App;
 
 use layergen_rs::{
-    ChunkCoord, ChunkGenerator, ChunkSize, DataSet, GenerationError,
-    GenerationLimits, LayerGenPlugin, PipelineBuilder, PipelineConfig,
-    PipelineStepResult, RequestError, Step, StepContext, WorldBounds,
+    ChunkCoord, ChunkGenerator, ChunkSize, DataSet, GenerationError, GenerationLimits,
+    LayerGenPlugin, PipelineBuilder, PipelineConfig, PipelineStepResult, RequestError, Step,
+    StepContext, WorldBounds,
 };
 
 fn config() -> PipelineConfig {
@@ -20,18 +20,14 @@ fn config() -> PipelineConfig {
 }
 
 fn basic_app(limits: GenerationLimits) -> App {
-    let pipeline = PipelineBuilder::new(config())
-        .build(|position| position.0);
+    let pipeline = PipelineBuilder::new(config()).build(|position| position.0);
 
     let mut app = App::new();
     app.add_plugins(LayerGenPlugin::new(pipeline).with_limits(limits));
     app
 }
 
-fn wait_for_completions<T: Send + Sync + 'static>(
-    app: &mut App,
-    expected: usize,
-) {
+fn wait_for_completions<T: Send + Sync + 'static>(app: &mut App, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
@@ -39,10 +35,7 @@ fn wait_for_completions<T: Send + Sync + 'static>(
 
         let generation = app.world().resource::<ChunkGenerator<T>>();
 
-        assert!(
-            generation.in_flight_count()
-                <= generation.limits().max_in_flight()
-        );
+        assert!(generation.in_flight_count() <= generation.limits().max_in_flight());
 
         if generation.completed_count() >= expected {
             return;
@@ -74,8 +67,7 @@ fn limits_reject_invalid_values() {
 fn rejects_outside_requests_without_using_capacity() {
     let mut app = basic_app(GenerationLimits::new(1, 2).unwrap());
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     let coord = ChunkCoord(4, 0, 0);
 
@@ -94,8 +86,7 @@ fn duplicate_is_reserved_until_completion_is_consumed() {
     let coord = ChunkCoord(0, 0, 0);
 
     let first_id = {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         let id = generation.request_batch(coord).unwrap();
 
@@ -109,8 +100,7 @@ fn duplicate_is_reserved_until_completion_is_consumed() {
 
     wait_for_completions::<i64>(&mut app, 1);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     assert_eq!(
         generation.request_batch(coord),
@@ -133,8 +123,7 @@ fn unconsumed_completions_continue_using_capacity() {
     let mut app = basic_app(GenerationLimits::new(1, 2).unwrap());
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         generation.request_batch(ChunkCoord(0, 0, 0)).unwrap();
         generation.request_batch(ChunkCoord(1, 0, 0)).unwrap();
@@ -147,8 +136,7 @@ fn unconsumed_completions_continue_using_capacity() {
 
     wait_for_completions::<i64>(&mut app, 2);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     assert_eq!(generation.queued_count(), 0);
     assert_eq!(generation.in_flight_count(), 0);
@@ -171,8 +159,7 @@ fn dispatcher_respects_in_flight_limit() {
     let mut app = basic_app(GenerationLimits::new(1, 4).unwrap());
 
     {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         for x in 0..4 {
             generation.request_batch(ChunkCoord(x, 0, 0)).unwrap();
@@ -196,11 +183,7 @@ fn dispatcher_respects_in_flight_limit() {
 struct AddSeed;
 
 impl Step<i64> for AddSeed {
-    fn run(
-        &self,
-        data: &mut DataSet<i64>,
-        context: &StepContext,
-    ) -> PipelineStepResult {
+    fn run(&self, data: &mut DataSet<i64>, context: &StepContext) -> PipelineStepResult {
         let seed = context.config().seed() as i64;
 
         for (value, _, _, _) in data.iter_mut() {
@@ -219,13 +202,11 @@ fn multiple_requests_have_independent_correct_results() {
 
     let mut app = App::new();
     app.add_plugins(
-        LayerGenPlugin::new(pipeline)
-            .with_limits(GenerationLimits::new(2, 4).unwrap()),
+        LayerGenPlugin::new(pipeline).with_limits(GenerationLimits::new(2, 4).unwrap()),
     );
 
     let expected = {
-        let mut generation =
-            app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+        let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
         (0..4)
             .map(|x| {
@@ -238,8 +219,7 @@ fn multiple_requests_have_independent_correct_results() {
 
     wait_for_completions::<i64>(&mut app, 4);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     let mut seen = Vec::new();
 
@@ -268,11 +248,7 @@ fn multiple_requests_have_independent_correct_results() {
 struct FailingStep;
 
 impl Step<i64> for FailingStep {
-    fn run(
-        &self,
-        _data: &mut DataSet<i64>,
-        _context: &StepContext,
-    ) -> PipelineStepResult {
+    fn run(&self, _data: &mut DataSet<i64>, _context: &StepContext) -> PipelineStepResult {
         Err("Planned step failure".to_owned())
     }
 }
@@ -294,8 +270,7 @@ fn step_failure_is_returned_as_a_completion() {
 
     wait_for_completions::<i64>(&mut app, 1);
 
-    let mut generation =
-        app.world_mut().resource_mut::<ChunkGenerator<i64>>();
+    let mut generation = app.world_mut().resource_mut::<ChunkGenerator<i64>>();
 
     let completion = generation.take_completed().unwrap();
 

@@ -214,13 +214,17 @@ impl StepContext {
     }
 }
 
+/// One generated chunk: dense cell data plus consumer-defined chunk data.
+///
+/// Chunk data defaults to `()` for pipelines that do not declare it.
 #[derive(Clone, Debug)]
-pub struct Chunk<T> {
+pub struct Chunk<T, C = ()> {
     pub(crate) context: StepContext,
     pub(crate) data: DataSet<T>,
+    pub(crate) chunk_data: C,
 }
 
-impl<T> Chunk<T> {
+impl<T, C> Chunk<T, C> {
     pub fn context(&self) -> StepContext {
         self.context
     }
@@ -243,6 +247,18 @@ impl<T> Chunk<T> {
 
     pub fn into_data(self) -> DataSet<T> {
         self.data
+    }
+
+    pub fn chunk_data(&self) -> &C {
+        &self.chunk_data
+    }
+
+    pub fn chunk_data_mut(&mut self) -> &mut C {
+        &mut self.chunk_data
+    }
+
+    pub fn into_parts(self) -> (DataSet<T>, C) {
+        (self.data, self.chunk_data)
     }
 }
 

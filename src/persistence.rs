@@ -296,9 +296,12 @@ impl Error for EditError {}
 /// Clone must produce independent editable cell values. Using shared interior
 /// mutability inside T can bypass editing/revision tracking and is unsupported
 /// by this managed-state contract.
-pub struct ManagedChunk<T> {
+///
+/// Chunk data `C` is the generated base chunk data. It is never persisted
+/// and is not updated by edits.
+pub struct ManagedChunk<T, C = ()> {
     identity: PersistenceIdentity,
-    base: Chunk<T>,
+    base: Chunk<T, C>,
     current: DataSet<T>,
     replacements: BTreeMap<usize, T>,
     edit_revision: u64,
@@ -306,10 +309,10 @@ pub struct ManagedChunk<T> {
     storage_revision: Option<StorageRevision>,
 }
 
-impl<T: Clone + PartialEq> ManagedChunk<T> {
+impl<T: Clone + PartialEq, C> ManagedChunk<T, C> {
     /// Validates saved state before applying any replacements.
     pub fn from_base(
-        base: Chunk<T>,
+        base: Chunk<T, C>,
         identity: PersistenceIdentity,
         stored: Option<StoredChunk<T>>,
     ) -> Result<Self, PersistenceError> {
@@ -375,6 +378,11 @@ impl<T: Clone + PartialEq> ManagedChunk<T> {
 
     pub fn base_data(&self) -> &DataSet<T> {
         self.base.data()
+    }
+
+    /// Generated base chunk data. Edits do not update it.
+    pub fn chunk_data(&self) -> &C {
+        self.base.chunk_data()
     }
 
     pub fn replacements(&self) -> &BTreeMap<usize, T> {

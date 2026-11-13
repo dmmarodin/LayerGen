@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     error::Error,
     fmt,
+    marker::PhantomData,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
 };
@@ -151,9 +152,9 @@ pub struct ManagedCompletion {
     pub result: Result<ManagedOutcome, ChunkManagerError>,
 }
 
-struct Resident<T> {
+struct Resident<T, C> {
     token: ManagedRequestId,
-    chunk: ManagedChunk<T>,
+    chunk: ManagedChunk<T, C>,
 }
 
 struct SaveSnapshot<T> {
@@ -163,11 +164,11 @@ struct SaveSnapshot<T> {
     record: ChunkRecord<T>,
 }
 
-enum OperationState<T> {
+enum OperationState<T, C> {
     LoadQueued,
     Generating(RequestId),
-    LoadReady(Chunk<T>),
-    Loading(Task<Result<ManagedChunk<T>, ChunkManagerError>>),
+    LoadReady(Chunk<T, C>),
+    Loading(Task<Result<ManagedChunk<T, C>, ChunkManagerError>>),
     SaveQueued(SaveSnapshot<T>),
     Saving {
         residency: ManagedRequestId,
@@ -176,15 +177,15 @@ enum OperationState<T> {
     },
 }
 
-impl<T> OperationState<T> {
+impl<T, C> OperationState<T, C> {
     fn is_storage_job(&self) -> bool {
         matches!(self, Self::Loading(_) | Self::Saving { .. })
     }
 }
 
-struct Operation<T> {
+struct Operation<T, C> {
     coord: ChunkCoord,
-    state: OperationState<T>,
+    state: OperationState<T, C>,
 }
 
 /// Game-facing chunk ownership, editing, and persistence.
@@ -194,22 +195,26 @@ struct Operation<T> {
 ///
 /// Resident data is read-only through this API. All effective edits advance
 /// the managed chunk revision and update its sparse replacements.
+///
+/// `C` is the pipeline's chunk data type (`()` unless declared). Chunk data
+/// is generated base output: it is not persisted and edits do not update it.
 #[derive(Resource)]
-pub struct ChunkManager<T: Clone + PartialEq + Send + Sync + 'static> {
+pub struct ChunkManager<T: Clone + PartialEq + Send + Sync + 'static, C: Send + Sync + 'static = ()>
+{
     config: PipelineConfig,
     identity: PersistenceIdentity,
     storage: Arc<dyn ChunkStorage<T>>,
     limits: ChunkManagerLimits,
     next_id: Option<u64>,
 
-    residents: HashMap<ChunkCoord, Resident<T>>,
+    residents: HashMap<ChunkCoord, Resident<T, C>>,
     active_loads: HashMap<ChunkCoord, ManagedRequestId>,
     active_saves: HashMap<ChunkCoord, ManagedRequestId>,
-    operations: BTreeMap<u64, Operation<T>>,
+    operations: BTreeMap<u64, Operation<T, C>>,
     completed: VecDeque<ManagedCompletion>,
 }
 
-impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManager<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static, C: Send + Sync + 'static> ChunkManager<T, C> {
     fn new(
         config: PipelineConfig,
         identity: PersistenceIdentity,
@@ -273,7 +278,7 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManager<T> {
         self.active_saves.contains_key(&coord)
     }
 
-    pub fn chunk(&self, coord: ChunkCoord) -> Option<&ManagedChunk<T>> {
+    pub fn chunk(&self, coord: ChunkCoord) -> Option<&ManagedChunk<T, C>> {
         self.residents.get(&coord).map(|resident| &resident.chunk)
     }
 
@@ -488,7 +493,7 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManager<T> {
     }
 }
 
-/// Install after LayerGenPlugin<T>.
+/// Install after LayerGenPlugin<T, C> (same cell and chunk data types).
 ///
 /// This plugin consumes all raw generation completions for T.
 /// Do not concurrently request/consume ChunkGenerator<T> from game systems.
@@ -496,18 +501,38 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManager<T> {
 /// Synchronous backend methods run on background compute-pool tasks.
 /// This is the initial native execution model; a blocking backend can occupy
 /// pool workers. Dedicated I/O scheduling is not implemented yet.
-pub struct ChunkManagerPlugin<T: Clone + PartialEq + Send + Sync + 'static> {
+pub struct ChunkManagerPlugin<
+    T: Clone + PartialEq + Send + Sync + 'static,
+    C: Send + Sync + 'static = (),
+> {
     identity: PersistenceIdentity,
     storage: Arc<dyn ChunkStorage<T>>,
     limits: ChunkManagerLimits,
+    _marker: PhantomData<fn() -> C>,
 }
 
-impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManagerPlugin<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManagerPlugin<T, ()> {
+    /// Manager for a pipeline without chunk data.
     pub fn new(identity: PersistenceIdentity, storage: Arc<dyn ChunkStorage<T>>) -> Self {
+        Self::with_chunk_data(identity, storage)
+    }
+}
+
+impl<T: Clone + PartialEq + Send + Sync + 'static, C: Send + Sync + 'static>
+    ChunkManagerPlugin<T, C>
+{
+    /// Manager for a pipeline declaring chunk data `C`.
+    ///
+    /// Name `C` explicitly, e.g. `ChunkManagerPlugin::<Voxel, Climate>::with_chunk_data`.
+    pub fn with_chunk_data(
+        identity: PersistenceIdentity,
+        storage: Arc<dyn ChunkStorage<T>>,
+    ) -> Self {
         Self {
             identity,
             storage,
             limits: ChunkManagerLimits::default(),
+            _marker: PhantomData,
         }
     }
 
@@ -517,17 +542,21 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> ChunkManagerPlugin<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + Sync + 'static> Plugin for ChunkManagerPlugin<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static, C: Send + Sync + 'static> Plugin
+    for ChunkManagerPlugin<T, C>
+{
     fn build(&self, app: &mut App) {
         assert!(
-            !app.world().contains_resource::<ChunkManager<T>>(),
-            "Only one ChunkManager per voxel type may be installed"
+            !app.world().contains_resource::<ChunkManager<T, C>>(),
+            "Only one ChunkManager per voxel and chunk data type may be installed"
         );
 
         let generator = app
             .world()
-            .get_resource::<ChunkGenerator<T>>()
-            .expect("Install LayerGenPlugin before ChunkManagerPlugin");
+            .get_resource::<ChunkGenerator<T, C>>()
+            .expect(
+                "Install LayerGenPlugin before ChunkManagerPlugin, \n                 with matching cell and chunk data types",
+            );
 
         assert_eq!(
             generator.outstanding_count(),
@@ -537,20 +566,23 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> Plugin for ChunkManagerPlugin
 
         let config = generator.config();
 
-        app.insert_resource(ChunkManager::new(
+        app.insert_resource(ChunkManager::<T, C>::new(
             config,
             self.identity.clone(),
             Arc::clone(&self.storage),
             self.limits,
         ));
 
-        app.add_systems(PreUpdate, advance_manager::<T>.after(LayerGenSet::Collect));
+        app.add_systems(
+            PreUpdate,
+            advance_manager::<T, C>.after(LayerGenSet::Collect),
+        );
     }
 }
 
-fn advance_manager<T: Clone + PartialEq + Send + Sync + 'static>(
-    mut manager: ResMut<ChunkManager<T>>,
-    mut generator: ResMut<ChunkGenerator<T>>,
+fn advance_manager<T: Clone + PartialEq + Send + Sync + 'static, C: Send + Sync + 'static>(
+    mut manager: ResMut<ChunkManager<T, C>>,
+    mut generator: ResMut<ChunkGenerator<T, C>>,
 ) {
     // First transfer completed base generation to the corresponding manager
     // operation. This releases the raw generator's outstanding slots.
